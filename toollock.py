@@ -119,6 +119,9 @@ class ToolLock:
         tool.set_retract(retract_length=retract_length, retract_speed=retract_speed, 
                         unretract_extra_length=unretract_extra_length, 
                         unretract_speed=unretract_speed, zhop=zhop)
+        # apply if it's current tool
+        if tool_id == int(self.tool_current):
+            tool.apply_retract_options()
     
     cmd_GET_TOOL_RETRACTION_help = 'Get retraction length of a tool or tools'
     def cmd_GET_TOOL_RETRACTION(self, gcmd = None):

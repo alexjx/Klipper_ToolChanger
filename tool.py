@@ -534,8 +534,8 @@ class Tool:
             return
         cmd = "SET_RETRACTION RETRACT_LENGTH=%.5f RETRACT_SPEED=%.5f" \
                     " UNRETRACT_EXTRA_LENGTH=%.5f UNRETRACT_SPEED=%.5f" \
-                    % (self.retract_length, self.retract_speed, self.unretract_extra_length, 
-                       self.unretract_speed, self.zhop,)
+                    % (self.retract_length, self.retract_speed, 
+                       self.unretract_extra_length, self.unretract_speed, )
         self.log.trace("Applying retract options: " + cmd)
         self.gcode.run_script_from_command(cmd)
 

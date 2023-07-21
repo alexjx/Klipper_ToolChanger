@@ -53,7 +53,8 @@ class ToolLock:
             'SET_PURGE_ON_TOOLCHANGE', 'SAVE_POSITION', 'SAVE_CURRENT_POSITION', 
             'RESTORE_POSITION', 'KTCC_SET_GCODE_OFFSET_FOR_CURRENT_TOOL',
             'KTCC_DISPLAY_TOOL_MAP', 'KTCC_REMAP_TOOL', 'KTCC_ENDSTOP_QUERY',
-            'KTCC_SET_ALL_TOOL_HEATERS_OFF', 'KTCC_RESUME_ALL_TOOL_HEATERS']
+            'KTCC_SET_ALL_TOOL_HEATERS_OFF', 'KTCC_RESUME_ALL_TOOL_HEATERS',
+            'SET_TOOL_RETRACTION', 'GET_TOOL_RETRACTION']
         for cmd in handlers:
             func = getattr(self, 'cmd_' + cmd)
             desc = getattr(self, 'cmd_' + cmd + '_help', None)
@@ -97,6 +98,53 @@ class ToolLock:
             self.ToolLock(True)
             self.SaveCurrentTool(str(t))
             self.log.always("ToolLock initialized with T%s." % self.tool_current) 
+
+    cmd_SET_TOOL_RETRACTION_help = 'Set retraction length of tool or tools.'
+    def cmd_SET_TOOL_RETRACTION(self, gcmd = None):
+        tool_id = gcmd.get_int('TOOL', None)
+        retract_length = gcmd.get_float('RETRACT_LENGTH', None)
+        retract_speed = gcmd.get_float('RETRACT_SPEED', None)
+        unretract_extra_length = gcmd.get_float('UNRETRACT_EXTRA', None)
+        unretract_speed = gcmd.get_float('UNRETRACT_SPEED', None)
+        zhop = gcmd.get_float('ZHOP', None)
+        if tool_id is None:
+            raise gcmd.error('missing tool id')
+        if retract_length is not None and unretract_extra_length is not None and retract_speed is not None \
+            and unretract_speed is not None and zhop is not None:
+            raise gcmd.error('missing parameter')
+        tool = self.printer.lookup_object('tool %d' % (tool_id,), None)
+        if not tool:
+            raise gcmd.error('invalid tool specified')
+        # send to the tool
+        tool.set_retract(retract_length=retract_length, retract_speed=retract_speed, 
+                        unretract_extra_length=unretract_extra_length, 
+                        unretract_speed=unretract_speed, zhop=zhop)
+    
+    cmd_GET_TOOL_RETRACTION_help = 'Get retraction length of a tool or tools'
+    def cmd_GET_TOOL_RETRACTION(self, gcmd = None):
+        tool_id = gcmd.get_int('TOOL', None)
+        if tool_id is not None:
+            tool = self.printer.lookup_object('tool %d' % (tool_id,), None)
+            if not tool:
+                raise gcmd.error('invalid tool specified')
+            gcmd.respond_info("TOOL %d: RETRACT_LENGTH=%.5f RETRACT_SPEED=%.5f"
+                                " UNRETRACT_EXTRA_LENGTH=%.5f UNRETRACT_SPEED=%.5f"
+                                " ZHOP=%.5f" 
+                                % (tool_id, tool.retract_length, tool.retract_speed,
+                                    tool.unretract_extra_length, tool.unretract_speed,
+                                    tool.zhop))
+            return
+        # if no tool specified, show all tools
+        for i in range(99):
+            tool = self.printer.lookup_object('tool %d' % (i,), None)
+            if not tool:
+                continue
+            gcmd.respond_info("TOOL %d: RETRACT_LENGTH=%.5f RETRACT_SPEED=%.5f"
+                                " UNRETRACT_EXTRA_LENGTH=%.5f UNRETRACT_SPEED=%.5f"
+                                " ZHOP=%.5f" 
+                                % (i, tool.retract_length, tool.retract_speed,
+                                    tool.unretract_extra_length, tool.unretract_speed,
+                                    tool.zhop))
 
     cmd_TOOL_LOCK_help = "Lock the ToolLock."
     def cmd_TOOL_LOCK(self, gcmd = None):
@@ -679,3 +727,4 @@ class ToolLock:
 
 def load_config(config):
     return ToolLock(config)
+

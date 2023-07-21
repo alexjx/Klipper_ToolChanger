@@ -69,6 +69,13 @@ class Tool:
         self.shaper_damping_ratio_x = 0.1
         self.shaper_damping_ratio_y = 0.1
 
+        # Retraction
+        self.retract_length = 0.0
+        self.retract_speed = 20.0
+        self.unretract_extra_length = 0.0
+        self.unretract_speed = 20.0
+        self.zhop = 0.0
+
         self.config = config
 
         # Under Consideration:
@@ -84,6 +91,7 @@ class Tool:
         self.gcode_macro = self.printer.load_object(config, 'gcode_macro')
         self.toollock = self.printer.lookup_object('toollock')
         self.log = self.printer.lookup_object('ktcclog')
+        self.firmware_retract = self.printer.lookup_object('firmware_retraction')
 
         ##### Name #####
         try:
@@ -382,6 +390,9 @@ class Tool:
             self.gcode.run_script_from_command(
                 "ACTIVATE_EXTRUDER extruder=%s" % 
                 (self.extruder))
+            
+        # apply new retraction options
+        self.apply_retract_options()
 
         # Run the gcode for pickup.
         try:
@@ -504,6 +515,29 @@ class Tool:
         self.log.trace("Virtual T%d Unloaded" % (int(self.name)))
 
         self.log.track_unmount_end(self.name)                 # Log the time it takes for tool unload. 
+
+    def set_retract(self, retract_length=None, retract_speed=None, unretract_extra_length=None, unretract_speed=None, zhop=None):
+        if retract_length is not None:
+            self.retract_length = retract_length
+        if retract_speed is not None:
+            self.retract_speed = retract_speed
+        if unretract_extra_length is not None:
+            self.unretract_extra_length = unretract_extra_length
+        if unretract_speed is not None:
+            self.unretract_speed = unretract_speed
+        if zhop is not None:
+            self.zhop = zhop
+
+    def apply_retract_options(self):
+        # if firmware retract is not enabled
+        if self.firmware_retract is None:
+            return
+        cmd = "SET_RETRACTION RETRACT_LENGTH=%.5f RETRACT_SPEED=%.5f" \
+                    " UNRETRACT_EXTRA_LENGTH=%.5f UNRETRACT_SPEED=%.5f" \
+                    " ZHOP=%.5f" % (self.retract_length, self.retract_speed, self.unretract_extra_length, 
+                                    self.unretract_speed, self.zhop,)
+        self.log.trace("Applying retract options: " + cmd)
+        self.gcode.run_script_from_command(cmd)
 
     def set_offset(self, **kwargs):
         for i in kwargs:

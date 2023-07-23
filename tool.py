@@ -410,7 +410,7 @@ class Tool:
 
         # Set Tool specific input shaper. -- Deprecated --
         if self.shaper_freq_x != 0 or self.shaper_freq_y != 0:
-            self.log.always("shaper_freq will be deprecated. Use SET_INPUT_SHAPER inside the pickup gcode instead.")
+            # self.log.always("shaper_freq will be deprecated. Use SET_INPUT_SHAPER inside the pickup gcode instead.")
             cmd = ("SET_INPUT_SHAPER" +
                 " SHAPER_FREQ_X=" + str(self.shaper_freq_x) +
                 " SHAPER_FREQ_Y=" + str(self.shaper_freq_y) +

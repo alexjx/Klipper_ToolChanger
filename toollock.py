@@ -54,7 +54,7 @@ class ToolLock:
             'RESTORE_POSITION', 'KTCC_SET_GCODE_OFFSET_FOR_CURRENT_TOOL',
             'KTCC_DISPLAY_TOOL_MAP', 'KTCC_REMAP_TOOL', 'KTCC_ENDSTOP_QUERY',
             'KTCC_SET_ALL_TOOL_HEATERS_OFF', 'KTCC_RESUME_ALL_TOOL_HEATERS',
-            'SET_TOOL_RETRACTION', 'GET_TOOL_RETRACTION']
+            'SET_TOOL_RETRACTION', 'GET_TOOL_RETRACTION', 'SAVE_TOOL_OFFSET']
         for cmd in handlers:
             func = getattr(self, 'cmd_' + cmd)
             desc = getattr(self, 'cmd_' + cmd + '_help', None)
@@ -70,12 +70,44 @@ class ToolLock:
 
     def _bootup_tasks(self, eventtime):
         try:
+            self.load_tool_offsets()
+        except Exception as e:
+            self.log.always('Warning: Error loading tool offsets: %s' % str(e))
+        try:
             if len(self.tool_map) > 0:
                 self.log.always(self._tool_map_to_human_string())
             self.Initialize_Tool_Lock()
         except Exception as e:
             self.log.always('Warning: Error booting up KTCC: %s' % str(e))
 
+    def load_tool_offsets(self):
+        save_variables = self.printer.lookup_object('save_variables')
+        for name, value in save_variables.allVariables.items():
+            if name.startswith('tool_offset_'):
+                tool_id = int(name[12:]) # type: ignore
+                tool = self.printer.lookup_object('tool %d' % (tool_id,))
+                if tool is None:
+                    continue
+                try:
+                    tool.set_offset(x_pos=value[0], y_pos=value[1], z_pos=value[2])
+                except Exception as ex:
+                    self.log.error(f'failed to restore tool {tool_id} offsets: {ex}')
+                    
+    def save_tool_offsets(self, tool_id):
+        tool = self.printer.lookup_object('tool %d' % (tool_id,))
+        if tool is None:
+            return
+        save_variables = self.printer.lookup_object('save_variables')
+        save_variables.cmd_SAVE_VARIABLE(self.gcode.create_gcode_command(
+            "SAVE_VARIABLE", "SAVE_VARIABLE", {"VARIABLE": 'tool_offset_%d' % (tool_id,), 'VALUE': tool.get_offset()}))
+
+    cmd_SAVE_TOOL_OFFSET_help = 'Save the offset of a tool.'
+    def cmd_SAVE_TOOL_OFFSET(self, gcmd):
+        tool_id = gcmd.get_int('TOOL', None, minval=0)
+        if tool_id is None:
+            raise gcmd.error('missing tool id')
+        self.save_tool_offsets(tool_id)
+    
     def Initialize_Tool_Lock(self):
         if not self.init_printer_to_last_tool:
             return None
@@ -84,7 +116,7 @@ class ToolLock:
         save_variables = self.printer.lookup_object('save_variables')
         try:
             self.tool_current = save_variables.allVariables["tool_current"]
-        except:
+        except Exception:
             self.tool_current = "-1"
             save_variables.cmd_SAVE_VARIABLE(self.gcode.create_gcode_command(
                 "SAVE_VARIABLE", "SAVE_VARIABLE", {"VARIABLE": "tool_current", 'VALUE': self.tool_current }))
@@ -730,4 +762,3 @@ class ToolLock:
 
 def load_config(config):
     return ToolLock(config)
-

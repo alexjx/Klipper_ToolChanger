@@ -163,7 +163,7 @@ class Tool:
             # Remove any accidental blank spaces.
             self.zone = [s.strip() for s in self.zone]
             self.park = [s.strip() for s in self.park]
-            self.offset = [s.strip() for s in self.offset]
+            self.offset = [float(s) for s in self.offset]
 
             if len(self.zone) < 3:
                 raise config.error("zone Offset is malformed, must be a list of x,y,z If you want it blank, use 0,0,0")
@@ -555,6 +555,11 @@ class Tool:
                 self.offset[2] = float(self.offset[2]) + float(kwargs[i])
 
         self.log.always("T%d offset now set to: %f, %f, %f." % (int(self.name), float(self.offset[0]), float(self.offset[1]), float(self.offset[2])))
+
+    def get_offset(self):
+        if self.offset is None:
+            return [0, 0, 0]
+        return [float(s) for s in self.offset]
 
     def _set_state(self, heater_state):
         self.heater_state = heater_state

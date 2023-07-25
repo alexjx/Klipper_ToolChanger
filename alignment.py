@@ -1,0 +1,307 @@
+import logging
+
+from collections import namedtuple
+
+DEFAULT_X_OFFSET = 0.0
+DEFAULT_Y_OFFSET = -39.0
+DEFAULT_Z_OFFSET = 10.0
+
+PROBE_SPEED = 0.1
+FAST_SPEED_Z = 2.0
+FAST_SPEED_XY = 5.0
+SWIFT_SPEED_XY = 12000.0
+
+PROBE_BACKOFF = 0.5
+XY_PROBE_DEPTH = 1.0
+XY_PROBE_OFFSET = 10.0
+
+Probes = namedtuple('Probes', ['x', 'y', 'z'])
+
+class AlignemntHelper:
+    def __init__(self, tool_id: int, probe_point: tuple[float, float], probes: Probes, printer) -> None:
+        self.printer = printer
+        self.tool_id = tool_id
+        self.tool = self.printer.lookup_object(f'tool {tool_id}', None)
+        if self.tool is None:
+            raise Exception(f'No tool with id {tool_id} found')
+        self.probe_point = probe_point
+        self.probes = probes
+        self.gcode = self.printer.lookup_object('gcode')
+        self.phoming = self.printer.lookup_object('homing')
+        self.toolhead = self.printer.lookup_object('toolhead')
+        self.z_samples = []
+        self.xy_samples = []
+
+    def get_z(self):
+        if len(self.z_samples) == 0:
+            raise Exception('z axis not sampled')
+        return sum(self.z_samples) / len(self.z_samples) # type: ignore
+    
+    def get_xy(self):
+        if len(self.xy_samples) == 0:
+            raise Exception('xy axis not sampled')
+        x = (self.xy_samples[0] + self.xy_samples[2]) / 2.0
+        y = (self.xy_samples[1] + self.xy_samples[3]) / 2.0
+        return (x - self.probe_point[0], y - self.probe_point[1])
+    
+    def tranform_to_machine_position(self, user_pos):
+        return [p + o for p, o in zip(user_pos, self.tool.offset)]
+
+    def prepare(self):
+        self.gcode.respond_info(f'preparing alignment for tool {self.tool_id}')
+        self.gcode.run_script_from_command(
+            'SAVE_GCODE_STATE NAME=alignment_state\n'
+            'KTCC_TOOL_DROPOFF_ALL\n'
+            'BED_MESH_CLEAR\n'
+            'G90\n'
+            'G28 Z\n'
+            f'SET_TOOL_OFFSET TOOL={self.tool_id} X={DEFAULT_X_OFFSET} Y={DEFAULT_Y_OFFSET} Z={DEFAULT_Z_OFFSET}\n'
+            f'T{self.tool_id}\n'
+            'M400\n'
+        )
+
+    def finish(self):
+        self.gcode.run_script_from_command(
+            'KTCC_TOOL_DROPOFF_ALL\n'
+        )
+
+    def move_in_user_pos(self, pos, speed, wait=True):
+        transformed_pos = self.tranform_to_machine_position(pos)
+        self.toolhead.manual_move(transformed_pos, speed)
+        if wait:
+            self.toolhead.wait_moves()
+
+    def probe_xy(self):
+        # for each tool we mesure 4 points, left, front, right, back
+        results = []
+
+        # we should have z sampled already
+        z_offset = self.get_z()
+        probe_x, probe_y = self.tranform_to_machine_position([self.probe_point[0], self.probe_point[1]])
+        probe_z = z_offset - XY_PROBE_DEPTH
+        pos = self.toolhead.get_position()
+        probe_center = [probe_x, probe_y, probe_z, pos[3]]
+
+        # raise z axis if necessary
+        if pos[2] <= z_offset:
+            self.gcode.respond_info(f'tool {self.tool_id}: raising z axis')
+            self.toolhead.manual_move([None, None, z_offset + 1.0], FAST_SPEED_Z)
+            self.toolhead.wait_moves()
+
+        # move to first probe point (left)
+        start_pos = self.tranform_to_machine_position([self.probe_point[0] - XY_PROBE_OFFSET, self.probe_point[1]])
+        self.toolhead.manual_move(start_pos, SWIFT_SPEED_XY)
+        self.toolhead.manual_move([None, None, probe_z], FAST_SPEED_Z)
+        self.toolhead.wait_moves()
+        
+        # probe left
+        epos = self.phoming.probing_move(self.probes.x, probe_center, FAST_SPEED_XY)
+        self.toolhead.manual_move([epos[0] - PROBE_BACKOFF, None], FAST_SPEED_XY) # back X a bit
+        self.toolhead.wait_moves()
+        epos = self.phoming.probing_move(self.probes.x, probe_center, PROBE_SPEED)
+        self.gcode.respond_info(f'tool {self.tool_id}: left probed at X={epos[0]}')
+        results.append(epos[0])
+
+        # move to next point (front)
+        self.toolhead.manual_move(start_pos, SWIFT_SPEED_XY)    # return to start   ( probe_center - XY_PROBE_OFFSET,   probe_center                   )
+        start_pos[1] -= XY_PROBE_OFFSET                         # move to           ( probe_center - XY_PROBE_OFFSET,   probe_center - XY_PROBE_OFFSET )
+        self.toolhead.manual_move(start_pos, SWIFT_SPEED_XY)
+        start_pos[0] += XY_PROBE_OFFSET                         # move to           ( probe_center,                     probe_center - XY_PROBE_OFFSET )
+        self.toolhead.manual_move(start_pos, SWIFT_SPEED_XY)
+        self.toolhead.wait_moves()
+
+        # probe front
+        epos = self.phoming.probing_move(self.probes.y, probe_center, FAST_SPEED_XY)
+        self.toolhead.manual_move([None, epos[1] - PROBE_BACKOFF], FAST_SPEED_XY) # back Y a bit
+        self.toolhead.wait_moves()
+        epos = self.phoming.probing_move(self.probes.y, probe_center, PROBE_SPEED)
+        self.gcode.respond_info(f'tool {self.tool_id}: front probed at Y={epos[1]}')
+        results.append(epos[1])
+
+        # move to next point (right)
+        self.toolhead.manual_move(start_pos, SWIFT_SPEED_XY)    # return to start   ( probe_center,                     probe_center - XY_PROBE_OFFSET )
+        start_pos[0] += XY_PROBE_OFFSET                         # move to           ( probe_center + XY_PROBE_OFFSET,   probe_center - XY_PROBE_OFFSET )
+        self.toolhead.manual_move(start_pos, SWIFT_SPEED_XY)
+        start_pos[1] += XY_PROBE_OFFSET                         # move to           ( probe_center + XY_PROBE_OFFSET,   probe_center                   )
+        self.toolhead.manual_move(start_pos, SWIFT_SPEED_XY)
+        self.toolhead.wait_moves()
+
+        # probe right
+        epos = self.phoming.probing_move(self.probes.x, probe_center, FAST_SPEED_XY)
+        self.toolhead.manual_move([epos[0] + PROBE_BACKOFF, None], FAST_SPEED_XY)
+        self.toolhead.wait_moves()
+        epos = self.phoming.probing_move(self.probes.x, probe_center, PROBE_SPEED)
+        self.gcode.respond_info(f'tool {self.tool_id}: right probed at X={epos[0]}')
+        results.append(epos[0])
+
+        # move to next point (back)
+        self.toolhead.manual_move(start_pos, SWIFT_SPEED_XY)    # return to start   ( probe_center + XY_PROBE_OFFSET,   probe_center                   )
+        start_pos[1] += XY_PROBE_OFFSET                         # move to           ( probe_center + XY_PROBE_OFFSET,   probe_center + XY_PROBE_OFFSET )
+        self.toolhead.manual_move(start_pos, SWIFT_SPEED_XY)
+        start_pos[0] -= XY_PROBE_OFFSET                         # move to           ( probe_center,                     probe_center + XY_PROBE_OFFSET )
+        self.toolhead.manual_move(start_pos, SWIFT_SPEED_XY)
+        self.toolhead.wait_moves()
+
+        # probe back
+        epos = self.phoming.probing_move(self.probes.y, probe_center, FAST_SPEED_XY)
+        self.toolhead.manual_move([None, epos[1] + PROBE_BACKOFF], FAST_SPEED_XY)
+        self.toolhead.wait_moves()
+        epos = self.phoming.probing_move(self.probes.y, probe_center, PROBE_SPEED)
+        self.gcode.respond_info(f'tool {self.tool_id}: back probed at Y={epos[1]}')
+        results.append(epos[1])
+
+        self.xy_samples = results
+        return results
+
+    def probe_z(self, n_samples: int = 3):
+        # toolhead position is the machine position in RRF
+        probe_tgt = self.tranform_to_machine_position([self.probe_point[0], self.probe_point[1], -DEFAULT_Z_OFFSET - 1.0])
+        logging.info(f'tool {self.tool_id}: probing z from location {probe_tgt}')
+        
+        pos = self.toolhead.get_position()
+        probe_tgt.append(pos[3]) # probing_move requires 4th axis
+
+        def _do_probe(probe_sp, lift_sp):
+            epos = self.phoming.probing_move(self.probes.z, probe_tgt, probe_sp)
+            result_z = epos[2]
+            self.toolhead.manual_move([None, None, result_z + PROBE_BACKOFF], lift_sp)
+            self.toolhead.wait_moves()
+            return result_z
+
+        # move to probe point fast
+        self.toolhead.manual_move([probe_tgt[0], probe_tgt[1]], SWIFT_SPEED_XY)
+
+        # establish z axis position
+        self.gcode.respond_info(f'tool {self.tool_id}: establishing z axis position')
+        _do_probe(FAST_SPEED_Z, FAST_SPEED_Z)
+        
+        # probe z axis
+        self.z_samples = []
+        for i in range(n_samples):
+            self.gcode.respond_info(f'tool {self.tool_id}: probing z axis, sample {i+1}/{n_samples}')
+            z_result = _do_probe(PROBE_SPEED, FAST_SPEED_Z)
+            self.gcode.respond_info(f'tool {self.tool_id}: z axis triggered at {z_result}')
+            self.z_samples.append(z_result)
+
+        return self.z_samples
+
+class Alignment:
+    def __init__(self, config):
+        self.config = config
+        self.printer = config.get_printer()
+        self.gcode = self.printer.lookup_object('gcode')
+
+        # Create an "endstop" object to handle the probe pin
+        ppins = self.printer.lookup_object('pins')
+        pin = config.get('pin')
+        logging.info(f'alignment: using pin {pin}')
+        pin_params = ppins.lookup_pin(pin, can_invert=True, can_pullup=True)
+        mcu = pin_params['chip']
+        
+        mcu_endstop_x = mcu.setup_pin('endstop', pin_params)
+        mcu_endstop_y = mcu.setup_pin('endstop', pin_params)
+        mcu_endstop_z = mcu.setup_pin('endstop', pin_params)
+        
+        query_endstops = self.printer.load_object(config, 'query_endstops')
+        query_endstops.register_endstop(mcu_endstop_x, 'alignment_probe_x')
+        query_endstops.register_endstop(mcu_endstop_y, 'alignment_probe_y')
+        query_endstops.register_endstop(mcu_endstop_z, 'alignment_probe_z')
+
+        self.probes = Probes(mcu_endstop_x, mcu_endstop_y, mcu_endstop_z)
+
+        self.printer.register_event_handler('klippy:mcu_identify',
+                                            self._handle_mcu_identify)
+    
+        self.gcode.register_command(
+            'KTCC_ALIGN_TOOLS', 
+            self.cmd_KTCC_ALIGN_TOOLS, 
+            False, 
+            self.cmd_KTCC_ALIGN_TOOLS_help,
+        )
+        
+    def _handle_mcu_identify(self):
+        # since we are doing alignment, we will register all 3 axes
+        kin = self.printer.lookup_object('toolhead').get_kinematics()
+        for stepper in kin.get_steppers():
+            if stepper.is_active_axis('x'):
+                self.probes.x.add_stepper(stepper)
+            if stepper.is_active_axis('y'):
+                self.probes.y.add_stepper(stepper)
+            if stepper.is_active_axis('z'):
+                self.probes.z.add_stepper(stepper)
+
+    cmd_KTCC_ALIGN_TOOLS_help = "aligns mutiple tools"
+    def cmd_KTCC_ALIGN_TOOLS(self, gcmd):
+        tools_to_probe_str = gcmd.get('TOOLS', None)
+        if tools_to_probe_str is not None:
+            tools_to_probe = [int(t) for t in tools_to_probe_str.split(',')]
+        else:
+            tools_to_probe = []
+            for i in range(99):
+                if self.printer.lookup_object(f'tool {i}', None) is not None:
+                    tools_to_probe.append(i)
+        n_samples = gcmd.get_int('SAMPLES', 3, minval=1)
+        n_retries = gcmd.get_int('RETRIES', 3, minval=1)
+        probe_point_str = gcmd.get('PROBE_POINT', None)
+        if probe_point_str is None:
+            raise gcmd.error("missing probe point")
+        probe_point = tuple(float(p) for p in probe_point_str.split(','))
+        if len(probe_point) != 2:
+            raise gcmd.error("invalid probe point")
+        tolerance = gcmd.get_float('TOLERANCE', 0.02, minval=0.0)
+        save_it = gcmd.get_int('SAVE', 0)
+
+        # check if we have homed all axes
+        toolhead = self.printer.lookup_object('toolhead')
+        curtime = self.printer.get_reactor().monotonic()
+        kin = toolhead.get_kinematics()
+        if kin.get_status(curtime)['homed_axes'] != 'xyz':
+            raise self.gcode.error("all axes must be homed before align")
+
+        self.gcode.respond_info(f'aligning tools {tools_to_probe} at probe point {probe_point} with {n_samples} samples and {n_retries} retries')
+
+        ktcclog = self.printer.lookup_object('ktcclog')
+
+        for tool_id in tools_to_probe:
+            for _ in range(n_retries):
+                samples = []
+                for i in range(n_samples):
+                    self.gcode.respond_info(f'probing tool {tool_id}, sample {i+1}/{n_samples}')
+                    helper = AlignemntHelper(tool_id, probe_point, self.probes, self.printer)
+                    
+                    helper.prepare()
+                    # ktcc log will mesh up the probe results
+                    with ktcclog.disable_save():
+                        helper.probe_z(3)
+                        helper.probe_xy()
+                    helper.finish()
+
+                    x, y = helper.get_xy()
+                    z = helper.get_z()
+
+                    self.gcode.respond_info(f'tool {tool_id}: sample {i+1}/{n_samples}: x={x}, y={y}, z={z}')
+                    samples.append((x, y, z))
+                    
+                # calculate average
+                x_avg = sum([s[0] for s in samples]) / len(samples)
+                y_avg = sum([s[1] for s in samples]) / len(samples)
+                z_avg = sum([s[2] for s in samples]) / len(samples)
+                # calculate mean absolute deviation
+                x_mad = sum([abs(s[0] - x_avg) for s in samples]) / len(samples)
+                y_mad = sum([abs(s[1] - y_avg) for s in samples]) / len(samples)
+                z_mad = sum([abs(s[2] - z_avg) for s in samples]) / len(samples)
+                # print out results
+                self.gcode.respond_info(f'tool {tool_id}: x={x_avg}, y={y_avg}, z={z_avg} (x_mad={x_mad}, y_mad={y_mad}, z_mad={z_mad})')
+                # check if we are within tolerance
+                if x_mad <= tolerance and y_mad <= tolerance and z_mad <= tolerance:
+                    self.gcode.respond_info(f'tool {tool_id}: alignment successful')
+                    self.gcode.run_script_from_command(f'SET_TOOL_OFFSET TOOL={tool_id} X={x_avg} Y={y_avg} Z={z_avg}')
+                    if save_it:
+                        self.gcode.run_script_from_command(f'SAVE_TOOL_OFFSET TOOL={tool_id}')
+                    break
+            else:
+                self.gcode.error(f'tool {tool_id}: alignment failed')
+                
+        
+def load_config(config):
+    return Alignment(config)

@@ -18,6 +18,7 @@
 
 import logging, logging.handlers, threading, queue, time
 import math, os.path, copy
+from contextlib import contextmanager
 
 # Forward all messages through a queue (polled by background thread)
 class KtccQueueHandler(logging.Handler):
@@ -93,6 +94,9 @@ class KtccLog:
         self.save_delay = 10
         self.save_active = True
 
+        # misc
+        self.timer_save = None
+
         # Register commands
         handlers = [
             'KTCC_LOG_TRACE', 'KTCC_LOG_DEBUG', 'KTCC_LOG_INFO', 'KTCC_LOG_ALWAYS', 
@@ -124,6 +128,14 @@ class KtccLog:
         self.prev_G28(gcmd)
         self.save_active = True                     # Resume to use SAVE_VARIABLE commands.
         # self.trace("Ending G28")
+
+    @contextmanager
+    def disable_save(self):
+        self.save_active = False
+        try:
+            yield
+        finally:
+            self.save_active = True
 
     def _save_changes_timer_event(self, eventtime):
         try:
@@ -171,7 +183,8 @@ class KtccLog:
 
     def handle_disconnect(self):
         self.always('KTCC Shutdown')
-        self.reactor.update_timer(self.timer_save, self.reactor.NEVER)
+        if self.timer_save:
+            self.reactor.update_timer(self.timer_save, self.reactor.NEVER)
         if self.queue_listener != None:
             self.queue_listener.stop()
 

@@ -7,7 +7,7 @@ DEFAULT_Y_OFFSET = -39.0
 DEFAULT_Z_OFFSET = 10.0
 
 PROBE_SPEED = 0.1
-FAST_SPEED_Z = 2.0
+FAST_SPEED_Z = 5.0
 FAST_SPEED_XY = 5.0
 SWIFT_SPEED_XY = 12000.0
 
@@ -42,6 +42,17 @@ class AlignemntHelper:
             raise Exception('xy axis not sampled')
         x = (self.xy_samples[0] + self.xy_samples[2]) / 2.0
         y = (self.xy_samples[1] + self.xy_samples[3]) / 2.0
+        
+        # klipper apply following tranform with offsets
+        #   x = toolhead_x - offset_x
+        #   y = toolhead_y - offset_y
+        # where toolhead_x and toolhead_y are the machine coordinates
+        # so when probing, it will be the probed position
+        # and x, y will be the probe point
+        # so we need to apply the inverse transform
+        #   offset_x = toolhead_x - x = probed_x - probe_point_x
+        #   offset_y = toolhead_y - y = probed_y - probe_point_y
+
         return (x - self.probe_point[0], y - self.probe_point[1])
     
     def tranform_to_machine_position(self, user_pos):
@@ -99,7 +110,7 @@ class AlignemntHelper:
         self.toolhead.manual_move([epos[0] - PROBE_BACKOFF, None], FAST_SPEED_XY) # back X a bit
         self.toolhead.wait_moves()
         epos = self.phoming.probing_move(self.probes.x, probe_center, PROBE_SPEED)
-        self.gcode.respond_info(f'tool {self.tool_id}: left probed at X={epos[0]}')
+        self.gcode.respond_info(f'tool {self.tool_id}: left probed at X={epos[0]:.4f}')
         results.append(epos[0])
 
         # move to next point (front)
@@ -115,7 +126,7 @@ class AlignemntHelper:
         self.toolhead.manual_move([None, epos[1] - PROBE_BACKOFF], FAST_SPEED_XY) # back Y a bit
         self.toolhead.wait_moves()
         epos = self.phoming.probing_move(self.probes.y, probe_center, PROBE_SPEED)
-        self.gcode.respond_info(f'tool {self.tool_id}: front probed at Y={epos[1]}')
+        self.gcode.respond_info(f'tool {self.tool_id}: front probed at Y={epos[1]:.4f}')
         results.append(epos[1])
 
         # move to next point (right)
@@ -131,7 +142,7 @@ class AlignemntHelper:
         self.toolhead.manual_move([epos[0] + PROBE_BACKOFF, None], FAST_SPEED_XY)
         self.toolhead.wait_moves()
         epos = self.phoming.probing_move(self.probes.x, probe_center, PROBE_SPEED)
-        self.gcode.respond_info(f'tool {self.tool_id}: right probed at X={epos[0]}')
+        self.gcode.respond_info(f'tool {self.tool_id}: right probed at X={epos[0]:.4f}')
         results.append(epos[0])
 
         # move to next point (back)
@@ -147,7 +158,7 @@ class AlignemntHelper:
         self.toolhead.manual_move([None, epos[1] + PROBE_BACKOFF], FAST_SPEED_XY)
         self.toolhead.wait_moves()
         epos = self.phoming.probing_move(self.probes.y, probe_center, PROBE_SPEED)
-        self.gcode.respond_info(f'tool {self.tool_id}: back probed at Y={epos[1]}')
+        self.gcode.respond_info(f'tool {self.tool_id}: back probed at Y={epos[1]:.4f}')
         results.append(epos[1])
 
         self.xy_samples = results
@@ -180,7 +191,7 @@ class AlignemntHelper:
         for i in range(n_samples):
             self.gcode.respond_info(f'tool {self.tool_id}: probing z axis, sample {i+1}/{n_samples}')
             z_result = _do_probe(PROBE_SPEED, FAST_SPEED_Z)
-            self.gcode.respond_info(f'tool {self.tool_id}: z axis triggered at {z_result}')
+            self.gcode.respond_info(f'tool {self.tool_id}: z axis triggered at {z_result:.4f}')
             self.z_samples.append(z_result)
 
         return self.z_samples
@@ -279,7 +290,7 @@ class Alignment:
                     x, y = helper.get_xy()
                     z = helper.get_z()
 
-                    self.gcode.respond_info(f'tool {tool_id}: sample {i+1}/{n_samples}: x={x}, y={y}, z={z}')
+                    self.gcode.respond_info(f'tool {tool_id}: sample {i+1}/{n_samples}: x={x:.4f}, y={y:.4f}, z={z:.4f}')
                     samples.append((x, y, z))
                     
                 # calculate average
@@ -291,11 +302,11 @@ class Alignment:
                 y_mad = sum([abs(s[1] - y_avg) for s in samples]) / len(samples)
                 z_mad = sum([abs(s[2] - z_avg) for s in samples]) / len(samples)
                 # print out results
-                self.gcode.respond_info(f'tool {tool_id}: x={x_avg}, y={y_avg}, z={z_avg} (x_mad={x_mad}, y_mad={y_mad}, z_mad={z_mad})')
+                self.gcode.respond_info(f'tool {tool_id}: x={x_avg:.4f}, y={y_avg:.4f}, z={z_avg:.4f} (x_mad={x_mad:.6f}, y_mad={y_mad:.6f}, z_mad={z_mad:.6f})')
                 # check if we are within tolerance
                 if x_mad <= tolerance and y_mad <= tolerance and z_mad <= tolerance:
                     self.gcode.respond_info(f'tool {tool_id}: alignment successful')
-                    self.gcode.run_script_from_command(f'SET_TOOL_OFFSET TOOL={tool_id} X={x_avg} Y={y_avg} Z={z_avg}')
+                    self.gcode.run_script_from_command(f'SET_TOOL_OFFSET TOOL={tool_id} X={x_avg:.4f} Y={y_avg:.4f} Z={z_avg:.4f}')
                     if save_it:
                         self.gcode.run_script_from_command(f'SAVE_TOOL_OFFSET TOOL={tool_id}')
                     break

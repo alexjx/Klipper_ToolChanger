@@ -74,6 +74,10 @@ class ToolLock:
         except Exception as e:
             self.log.always('Warning: Error loading tool offsets: %s' % str(e))
         try:
+            self.load_global_offset()
+        except Exception as e:
+            self.log.always('Warning: Error loading global offset: %s' % str(e))
+        try:
             if len(self.tool_map) > 0:
                 self.log.always(self._tool_map_to_human_string())
             self.Initialize_Tool_Lock()
@@ -527,6 +531,16 @@ class ToolLock:
             self.global_offset[2] = float(self.global_offset[2]) + float(z_adjust)
 
         self.log.trace("Global offset now set to: %f, %f, %f." % (float(self.global_offset[0]), float(self.global_offset[1]), float(self.global_offset[2])))
+        self.save_global_offset()
+
+    def save_global_offset(self):
+        save_variables = self.printer.lookup_object('save_variables')
+        save_variables.cmd_SAVE_VARIABLE(self.gcode.create_gcode_command(
+            "SAVE_VARIABLE", "SAVE_VARIABLE", {"VARIABLE": "ktcc_global_offset", 'VALUE': self.global_offset }))
+        
+    def load_global_offset(self):
+        save_variables = self.printer.lookup_object('save_variables')
+        self.global_offset = [p for p in save_variables.allVariables.get('ktcc_global_offset', [0,0,0])]
 
     cmd_SET_PURGE_ON_TOOLCHANGE_help = "Set the global variable if the tool should be purged or primed with filament at toolchange."
     def cmd_SET_PURGE_ON_TOOLCHANGE(self, gcmd = None):

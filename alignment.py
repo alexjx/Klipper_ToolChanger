@@ -7,9 +7,10 @@ DEFAULT_Y_OFFSET = -39.0
 DEFAULT_Z_OFFSET = 10.0
 
 PROBE_SPEED = 0.1
-FAST_SPEED_Z = 5.0
-FAST_SPEED_XY = 5.0
-SWIFT_SPEED_XY = 12000.0
+FAST_PROBE_SPEED = 5.0
+
+FAST_MOVE_SPEED_XY = 6000.0
+FAST_MOVE_SPEED_Z = 10.0
 
 PROBE_BACKOFF = 0.5
 XY_PROBE_DEPTH = 1.0
@@ -29,6 +30,7 @@ class AlignemntHelper:
         self.gcode = self.printer.lookup_object('gcode')
         self.phoming = self.printer.lookup_object('homing')
         self.toolhead = self.printer.lookup_object('toolhead')
+
         self.z_samples = []
         self.xy_samples = []
 
@@ -68,6 +70,7 @@ class AlignemntHelper:
             'G28 Z\n'
             f'SET_TOOL_OFFSET TOOL={self.tool_id} X={DEFAULT_X_OFFSET} Y={DEFAULT_Y_OFFSET} Z={DEFAULT_Z_OFFSET}\n'
             f'T{self.tool_id}\n'
+            f'G0 X{self.probe_point[0]} Y{self.probe_point[1]} F12000\n'
             'M400\n'
         )
 
@@ -96,66 +99,66 @@ class AlignemntHelper:
         # raise z axis if necessary
         if pos[2] <= z_offset:
             self.gcode.respond_info(f'tool {self.tool_id}: raising z axis')
-            self.toolhead.manual_move([None, None, z_offset + 1.0], FAST_SPEED_Z)
+            self.toolhead.manual_move([None, None, z_offset + 1.0], FAST_MOVE_SPEED_Z)
             self.toolhead.wait_moves()
 
         # move to first probe point (left)
         start_pos = self.tranform_to_machine_position([self.probe_point[0] - XY_PROBE_OFFSET, self.probe_point[1]])
-        self.toolhead.manual_move(start_pos, SWIFT_SPEED_XY)
-        self.toolhead.manual_move([None, None, probe_z], FAST_SPEED_Z)
+        self.toolhead.manual_move(start_pos, FAST_MOVE_SPEED_XY)
+        self.toolhead.manual_move([None, None, probe_z], FAST_MOVE_SPEED_Z)
         self.toolhead.wait_moves()
         
         # probe left
-        epos = self.phoming.probing_move(self.probes.x, probe_center, FAST_SPEED_XY)
-        self.toolhead.manual_move([epos[0] - PROBE_BACKOFF, None], FAST_SPEED_XY) # back X a bit
+        epos = self.phoming.probing_move(self.probes.x, probe_center, FAST_PROBE_SPEED)
+        self.toolhead.manual_move([epos[0] - PROBE_BACKOFF, None], FAST_MOVE_SPEED_XY) # back X a bit
         self.toolhead.wait_moves()
         epos = self.phoming.probing_move(self.probes.x, probe_center, PROBE_SPEED)
         self.gcode.respond_info(f'tool {self.tool_id}: left probed at X={epos[0]:.4f}')
         results.append(epos[0])
 
         # move to next point (front)
-        self.toolhead.manual_move(start_pos, SWIFT_SPEED_XY)    # return to start   ( probe_center - XY_PROBE_OFFSET,   probe_center                   )
-        start_pos[1] -= XY_PROBE_OFFSET                         # move to           ( probe_center - XY_PROBE_OFFSET,   probe_center - XY_PROBE_OFFSET )
-        self.toolhead.manual_move(start_pos, SWIFT_SPEED_XY)
-        start_pos[0] += XY_PROBE_OFFSET                         # move to           ( probe_center,                     probe_center - XY_PROBE_OFFSET )
-        self.toolhead.manual_move(start_pos, SWIFT_SPEED_XY)
+        self.toolhead.manual_move(start_pos, FAST_MOVE_SPEED_XY)    # return to start   ( probe_center - XY_PROBE_OFFSET,   probe_center                   )
+        start_pos[1] -= XY_PROBE_OFFSET                             # move to           ( probe_center - XY_PROBE_OFFSET,   probe_center - XY_PROBE_OFFSET )
+        self.toolhead.manual_move(start_pos, FAST_MOVE_SPEED_XY)
+        start_pos[0] += XY_PROBE_OFFSET                             # move to           ( probe_center,                     probe_center - XY_PROBE_OFFSET )
+        self.toolhead.manual_move(start_pos, FAST_MOVE_SPEED_XY)
         self.toolhead.wait_moves()
 
         # probe front
-        epos = self.phoming.probing_move(self.probes.y, probe_center, FAST_SPEED_XY)
-        self.toolhead.manual_move([None, epos[1] - PROBE_BACKOFF], FAST_SPEED_XY) # back Y a bit
+        epos = self.phoming.probing_move(self.probes.y, probe_center, FAST_PROBE_SPEED)
+        self.toolhead.manual_move([None, epos[1] - PROBE_BACKOFF], FAST_MOVE_SPEED_XY) # back Y a bit
         self.toolhead.wait_moves()
         epos = self.phoming.probing_move(self.probes.y, probe_center, PROBE_SPEED)
         self.gcode.respond_info(f'tool {self.tool_id}: front probed at Y={epos[1]:.4f}')
         results.append(epos[1])
 
         # move to next point (right)
-        self.toolhead.manual_move(start_pos, SWIFT_SPEED_XY)    # return to start   ( probe_center,                     probe_center - XY_PROBE_OFFSET )
-        start_pos[0] += XY_PROBE_OFFSET                         # move to           ( probe_center + XY_PROBE_OFFSET,   probe_center - XY_PROBE_OFFSET )
-        self.toolhead.manual_move(start_pos, SWIFT_SPEED_XY)
-        start_pos[1] += XY_PROBE_OFFSET                         # move to           ( probe_center + XY_PROBE_OFFSET,   probe_center                   )
-        self.toolhead.manual_move(start_pos, SWIFT_SPEED_XY)
+        self.toolhead.manual_move(start_pos, FAST_MOVE_SPEED_XY)    # return to start   ( probe_center,                     probe_center - XY_PROBE_OFFSET )
+        start_pos[0] += XY_PROBE_OFFSET                             # move to           ( probe_center + XY_PROBE_OFFSET,   probe_center - XY_PROBE_OFFSET )
+        self.toolhead.manual_move(start_pos, FAST_MOVE_SPEED_XY)
+        start_pos[1] += XY_PROBE_OFFSET                             # move to           ( probe_center + XY_PROBE_OFFSET,   probe_center                   )
+        self.toolhead.manual_move(start_pos, FAST_MOVE_SPEED_XY)
         self.toolhead.wait_moves()
 
         # probe right
-        epos = self.phoming.probing_move(self.probes.x, probe_center, FAST_SPEED_XY)
-        self.toolhead.manual_move([epos[0] + PROBE_BACKOFF, None], FAST_SPEED_XY)
+        epos = self.phoming.probing_move(self.probes.x, probe_center, FAST_PROBE_SPEED)
+        self.toolhead.manual_move([epos[0] + PROBE_BACKOFF, None], FAST_MOVE_SPEED_XY)
         self.toolhead.wait_moves()
         epos = self.phoming.probing_move(self.probes.x, probe_center, PROBE_SPEED)
         self.gcode.respond_info(f'tool {self.tool_id}: right probed at X={epos[0]:.4f}')
         results.append(epos[0])
 
         # move to next point (back)
-        self.toolhead.manual_move(start_pos, SWIFT_SPEED_XY)    # return to start   ( probe_center + XY_PROBE_OFFSET,   probe_center                   )
-        start_pos[1] += XY_PROBE_OFFSET                         # move to           ( probe_center + XY_PROBE_OFFSET,   probe_center + XY_PROBE_OFFSET )
-        self.toolhead.manual_move(start_pos, SWIFT_SPEED_XY)
-        start_pos[0] -= XY_PROBE_OFFSET                         # move to           ( probe_center,                     probe_center + XY_PROBE_OFFSET )
-        self.toolhead.manual_move(start_pos, SWIFT_SPEED_XY)
+        self.toolhead.manual_move(start_pos, FAST_MOVE_SPEED_XY)    # return to start   ( probe_center + XY_PROBE_OFFSET,   probe_center                   )
+        start_pos[1] += XY_PROBE_OFFSET                             # move to           ( probe_center + XY_PROBE_OFFSET,   probe_center + XY_PROBE_OFFSET )
+        self.toolhead.manual_move(start_pos, FAST_MOVE_SPEED_XY)
+        start_pos[0] -= XY_PROBE_OFFSET                             # move to           ( probe_center,                     probe_center + XY_PROBE_OFFSET )
+        self.toolhead.manual_move(start_pos, FAST_MOVE_SPEED_XY)
         self.toolhead.wait_moves()
 
         # probe back
-        epos = self.phoming.probing_move(self.probes.y, probe_center, FAST_SPEED_XY)
-        self.toolhead.manual_move([None, epos[1] + PROBE_BACKOFF], FAST_SPEED_XY)
+        epos = self.phoming.probing_move(self.probes.y, probe_center, FAST_PROBE_SPEED)
+        self.toolhead.manual_move([None, epos[1] + PROBE_BACKOFF], FAST_MOVE_SPEED_XY)
         self.toolhead.wait_moves()
         epos = self.phoming.probing_move(self.probes.y, probe_center, PROBE_SPEED)
         self.gcode.respond_info(f'tool {self.tool_id}: back probed at Y={epos[1]:.4f}')
@@ -180,17 +183,17 @@ class AlignemntHelper:
             return result_z
 
         # move to probe point fast
-        self.toolhead.manual_move([probe_tgt[0], probe_tgt[1]], SWIFT_SPEED_XY)
+        self.toolhead.manual_move([probe_tgt[0], probe_tgt[1]], FAST_MOVE_SPEED_XY)
 
         # establish z axis position
         self.gcode.respond_info(f'tool {self.tool_id}: establishing z axis position')
-        _do_probe(FAST_SPEED_Z, FAST_SPEED_Z)
+        _do_probe(FAST_PROBE_SPEED, FAST_MOVE_SPEED_Z)
         
         # probe z axis
         self.z_samples = []
         for i in range(n_samples):
             self.gcode.respond_info(f'tool {self.tool_id}: probing z axis, sample {i+1}/{n_samples}')
-            z_result = _do_probe(PROBE_SPEED, FAST_SPEED_Z)
+            z_result = _do_probe(PROBE_SPEED, FAST_MOVE_SPEED_Z)
             self.gcode.respond_info(f'tool {self.tool_id}: z axis triggered at {z_result:.4f}')
             self.z_samples.append(z_result)
 
@@ -303,6 +306,7 @@ class Alignment:
                 z_mad = sum([abs(s[2] - z_avg) for s in samples]) / len(samples)
                 # print out results
                 self.gcode.respond_info(f'tool {tool_id}: x={x_avg:.4f}, y={y_avg:.4f}, z={z_avg:.4f} (x_mad={x_mad:.6f}, y_mad={y_mad:.6f}, z_mad={z_mad:.6f})')
+                
                 # check if we are within tolerance
                 if x_mad <= tolerance and y_mad <= tolerance and z_mad <= tolerance:
                     self.gcode.respond_info(f'tool {tool_id}: alignment successful')

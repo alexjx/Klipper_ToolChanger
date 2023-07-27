@@ -78,6 +78,10 @@ class ToolLock:
         except Exception as e:
             self.log.always('Warning: Error loading global offset: %s' % str(e))
         try:
+            self.load_tool_retractions()
+        except Exception as e:
+            self.log.always('Warning: Error loading tool retractions: %s' % str(e))
+        try:
             if len(self.tool_map) > 0:
                 self.log.always(self._tool_map_to_human_string())
             self.Initialize_Tool_Lock()
@@ -87,8 +91,9 @@ class ToolLock:
     def load_tool_offsets(self):
         save_variables = self.printer.lookup_object('save_variables')
         for name, value in save_variables.allVariables.items():
-            if name.startswith('tool_offset_'):
-                tool_id = int(name[12:]) # type: ignore
+            ktcc_tool_offset_prefix = 'ktcc_tool_offset_'
+            if name.startswith(ktcc_tool_offset_prefix):
+                tool_id = int(name[len(ktcc_tool_offset_prefix):]) # type: ignore
                 tool = self.printer.lookup_object('tool %d' % (tool_id,))
                 if tool is None:
                     continue
@@ -103,7 +108,7 @@ class ToolLock:
             return
         save_variables = self.printer.lookup_object('save_variables')
         save_variables.cmd_SAVE_VARIABLE(self.gcode.create_gcode_command(
-            "SAVE_VARIABLE", "SAVE_VARIABLE", {"VARIABLE": 'tool_offset_%d' % (tool_id,), 'VALUE': tool.get_offset()}))
+            "SAVE_VARIABLE", "SAVE_VARIABLE", {"VARIABLE": 'ktcc_tool_offset_%d' % (tool_id,), 'VALUE': tool.get_offset()}))
 
     cmd_SAVE_TOOL_OFFSET_help = 'Save the offset of a tool.'
     def cmd_SAVE_TOOL_OFFSET(self, gcmd):
@@ -135,8 +140,41 @@ class ToolLock:
             self.SaveCurrentTool(str(t))
             self.log.always("ToolLock initialized with T%s." % self.tool_current) 
 
+    def load_tool_retractions(self):
+        save_variables = self.printer.lookup_object('save_variables')
+        for name, value in save_variables.allVariables.items():
+            ktcc_retract_tool_prefix = 'ktcc_retract_tool_'
+            if name.startswith(ktcc_retract_tool_prefix):
+                tool_id = int(name[len(ktcc_retract_tool_prefix):]) # type: ignore
+                tool = self.printer.lookup_object('tool %d' % (tool_id,))
+                if tool is None:
+                    continue
+                try:
+                    tool.set_retract(
+                        retract_length=value.get('retract_length', 20.0), 
+                        retract_speed=value.get('retract_speed', 40.0), 
+                        unretract_extra_length=value.get('unretract_extra_length', 0.0), 
+                        unretract_speed=value.get('unretract_speed', 40.0),
+                    )
+                except Exception as ex:
+                    self.log.error(f'failed to restore tool {tool_id} offsets: {ex}')
+                    
+    def save_tool_retractions(self, tool_id):
+        tool = self.printer.lookup_object('tool %d' % (tool_id,))
+        if tool is None:
+            return
+        save_variables = self.printer.lookup_object('save_variables')
+        retract_info = {
+            'retract_length': tool.retract_length,
+            'retract_speed': tool.retract_speed,
+            'unretract_extra_length': tool.unretract_extra_length,
+            'unretract_speed': tool.unretract_speed,
+        }
+        save_variables.cmd_SAVE_VARIABLE(self.gcode.create_gcode_command(
+            "SAVE_VARIABLE", "SAVE_VARIABLE", {"VARIABLE": 'ktcc_retract_tool_%d' % (tool_id,), 'VALUE': retract_info}))
+
     cmd_SET_TOOL_RETRACTION_help = 'Set retraction length of tool or tools.'
-    def cmd_SET_TOOL_RETRACTION(self, gcmd = None):
+    def cmd_SET_TOOL_RETRACTION(self, gcmd):
         tool_id = gcmd.get_int('TOOL', None)
         retract_length = gcmd.get_float('RETRACT_LENGTH', None)
         retract_speed = gcmd.get_float('RETRACT_SPEED', None)
@@ -158,9 +196,11 @@ class ToolLock:
         # apply if it's current tool
         if tool_id == int(self.tool_current):
             tool.apply_retract_options()
+        # save to file
+        self.save_tool_retractions(tool_id)
     
     cmd_GET_TOOL_RETRACTION_help = 'Get retraction length of a tool or tools'
-    def cmd_GET_TOOL_RETRACTION(self, gcmd = None):
+    def cmd_GET_TOOL_RETRACTION(self, gcmd):
         tool_id = gcmd.get_int('TOOL', None)
         if tool_id is not None:
             tool = self.printer.lookup_object('tool %d' % (tool_id,), None)

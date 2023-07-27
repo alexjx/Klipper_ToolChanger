@@ -532,12 +532,21 @@ class Tool:
         # if firmware retract is not enabled
         if self.firmware_retract is None:
             return
-        cmd = "SET_RETRACTION RETRACT_LENGTH=%.5f RETRACT_SPEED=%.5f" \
-                    " UNRETRACT_EXTRA_LENGTH=%.5f UNRETRACT_SPEED=%.5f" \
-                    % (self.retract_length, self.retract_speed, 
-                       self.unretract_extra_length, self.unretract_speed, )
-        self.log.trace("Applying retract options: " + cmd)
-        self.gcode.run_script_from_command(cmd)
+
+        self.firmware_retract.cmd_SET_RETRACTION(
+            self.gcode.create_gcode_command(
+                "SET_RETRACTION", 
+                "SET_RETRACTION", 
+                {
+                    "RETRACT_LENGTH": self.retract_length,
+                    "RETRACT_SPEED": self.retract_speed,
+                    "UNRETRACT_EXTRA_LENGTH": self.unretract_extra_length,
+                    "UNRETRACT_SPEED": self.unretract_speed,
+                },
+            )
+        )
+
+        self.log.debug("Tool %s: Firmware retract options applied." % self.name)
 
     def set_offset(self, **kwargs):
         for i in kwargs:
@@ -688,7 +697,11 @@ class Tool:
             "virtual_loaded": self.virtual_loaded,
             "requires_pickup_for_virtual_load": self.requires_pickup_for_virtual_load,
             "requires_pickup_for_virtual_unload": self.requires_pickup_for_virtual_unload,
-            "unload_virtual_at_dropoff": self.unload_virtual_at_dropoff
+            "unload_virtual_at_dropoff": self.unload_virtual_at_dropoff,
+            "retract_length": self.retract_length,
+            "retract_speed": self.retract_speed,
+            "unretract_extra_length": self.unretract_extra_length,
+            "unretract_speed": self.unretract_speed,
         }
         return status
 

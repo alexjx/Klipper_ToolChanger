@@ -1,5 +1,7 @@
 import logging
+import re
 
+from contextlib import contextmanager
 from collections import namedtuple
 
 DEFAULT_X_OFFSET = 0.0
@@ -9,7 +11,7 @@ DEFAULT_Z_OFFSET = 10.0
 PROBE_SPEED = 0.1
 FAST_PROBE_SPEED = 5.0
 
-FAST_MOVE_SPEED_XY = 6000.0
+FAST_MOVE_SPEED_XY = 300.0
 FAST_MOVE_SPEED_Z = 10.0
 
 PROBE_BACKOFF = 0.5
@@ -200,10 +202,19 @@ class AlignemntHelper:
         return self.z_samples
 
 class Alignment:
+    TMC_STEPPERS = re.compile(r'tmc[0-9]+ stepper_[xyz]')
+
     def __init__(self, config):
         self.config = config
         self.printer = config.get_printer()
         self.gcode = self.printer.lookup_object('gcode')
+
+        # steppers
+        self.steppers = {}
+        for name, obj in self.printer.lookup_objects():
+            if self.TMC_STEPPERS.match(name):
+                axis = name[-1]
+                self.steppers[axis] = obj
 
         # Create an "endstop" object to handle the probe pin
         ppins = self.printer.lookup_object('pins')
@@ -244,6 +255,28 @@ class Alignment:
             if stepper.is_active_axis('z'):
                 self.probes.z.add_stepper(stepper)
 
+    @contextmanager
+    def lower_stepper_current(self):
+        # lower stepper current
+        run_current = {}
+        for axis, stepper in self.steppers.items():
+            self.gcode.respond_info(f'lowering stepper current for axis {axis}')
+            run_current[axis] = stepper.get_status()['run_current']
+            self.gcode.run_script_from_command(
+                f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.4:.4f}\n'
+                'G4 P200\n'
+            )
+
+        yield
+        
+        # restore stepper current
+        for axis, stepper in self.steppers.items():
+            self.gcode.respond_info(f'restoring stepper current for axis {axis}')
+            self.gcode.run_script_from_command(
+                f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis]}\n'
+                'G4 P200\n'
+            )
+    
     cmd_KTCC_ALIGN_TOOLS_help = "aligns mutiple tools"
     def cmd_KTCC_ALIGN_TOOLS(self, gcmd):
         tools_to_probe_str = gcmd.get('TOOLS', None)
@@ -285,7 +318,7 @@ class Alignment:
                     
                     helper.prepare()
                     # ktcc log will mesh up the probe results
-                    with ktcclog.disable_save():
+                    with self.lower_stepper_current(), ktcclog.disable_save():
                         helper.probe_z(3)
                         helper.probe_xy()
                     helper.finish()

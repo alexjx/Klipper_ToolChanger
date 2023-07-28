@@ -1,5 +1,14 @@
 # Tools for klipper (KTCC - Klipper Tool Changer Code)
 
+## Changes
+
+1. Automatic tool alignment
+2. Tool offset persist to "Saved Variable"
+3. Global offset persist to "Saved Variable"
+4. Retraction persist to "Saved Variable"
+
+## Introduction
+
 This are python modules, macros and example config for the
 [Klipper 3D printer firmware](https://github.com/Klipper3d/klipper). 
 In short 

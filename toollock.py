@@ -54,7 +54,9 @@ class ToolLock:
             'RESTORE_POSITION', 'KTCC_SET_GCODE_OFFSET_FOR_CURRENT_TOOL',
             'KTCC_DISPLAY_TOOL_MAP', 'KTCC_REMAP_TOOL', 'KTCC_ENDSTOP_QUERY',
             'KTCC_SET_ALL_TOOL_HEATERS_OFF', 'KTCC_RESUME_ALL_TOOL_HEATERS',
-            'SET_TOOL_RETRACTION', 'GET_TOOL_RETRACTION', 'SAVE_TOOL_OFFSET']
+            'SET_TOOL_RETRACTION', 'GET_TOOL_RETRACTION', 'SAVE_TOOL_OFFSET',
+            'SET_TOOL_PRESSURE_ADVANCE', 'GET_TOOL_PRESSURE_ADVANCE', 'SAVE_TOOL_PRESSURE_ADVANCE',
+        ]
         for cmd in handlers:
             func = getattr(self, 'cmd_' + cmd)
             desc = getattr(self, 'cmd_' + cmd + '_help', None)
@@ -81,6 +83,10 @@ class ToolLock:
             self.load_tool_retractions()
         except Exception as e:
             self.log.always('Warning: Error loading tool retractions: %s' % str(e))
+        try:
+            self.load_tool_pressure_advance()
+        except Exception as e:
+            self.log.always('Warning: Error loading tool pressure advance: %s' % str(e))
         try:
             if len(self.tool_map) > 0:
                 self.log.always(self._tool_map_to_human_string())
@@ -225,6 +231,95 @@ class ToolLock:
                                     tool.unretract_extra_length, tool.unretract_speed,
                                     tool.zhop))
 
+    cmd_SET_TOOL_PRESSURE_ADVANCE_help = 'Set pressure advance of tool'
+    def cmd_SET_TOOL_PRESSURE_ADVANCE(self, gcmd):
+        tool_id = gcmd.get_int('TOOL', None)
+        extruder_name = gcmd.get('EXTRUDER', None)
+        if tool_id is None and extruder_name is None:
+            tool_id = int(self.tool_current)
+            if tool_id < 0:
+                raise gcmd.error('missing tool id')
+
+        pressure_advance = gcmd.get_float('ADVANCE', None)
+        smooth_time = gcmd.get_float('SMOOTH_TIME', None)
+        if pressure_advance is None and smooth_time is None:
+            raise gcmd.error('missing parameter')
+
+        if tool_id is not None:
+            tool = self.printer.lookup_object('tool %d' % (tool_id,), None)
+            if not tool:
+                raise gcmd.error('invalid tool specified')
+        else:
+            # if no tool specified, search for extruder name
+            for i in range(99):
+                tool = self.printer.lookup_object('tool %d' % (i,), None)
+                if not tool:
+                    continue
+                if tool.extruder == extruder_name:
+                    tool_id = i
+                    break
+            else:
+                raise gcmd.error('invalid extruder specified')
+
+        # send to the tool
+        tool.set_pressure_advance(pressure_advance=pressure_advance, smooth_time=smooth_time)
+        # save to file
+        self.save_tool_pressure_advance(tool_id)
+
+    cmd_GET_TOOL_PRESSURE_ADVANCE_help = 'Get pressure advance of a tool'
+    def cmd_GET_TOOL_PRESSURE_ADVANCE(self, gcmd):
+        tool_id = gcmd.get_int('TOOL', None)
+        if tool_id is not None:
+            tool = self.printer.lookup_object('tool %d' % (tool_id,), None)
+            if not tool:
+                raise gcmd.error('invalid tool specified')
+            gcmd.respond_info("TOOL %d: ADANVCE=%.5f SMOOTH_TIME=%.5f"
+                                % (tool_id, tool.pressure_advance, tool.pressure_advance_smooth_time,))
+            return
+        # if no tool specified, show all tools
+        for i in range(99):
+            tool = self.printer.lookup_object('tool %d' % (i,), None)
+            if not tool:
+                continue
+            gcmd.respond_info("TOOL %d: ADANVCE=%.5f SMOOTH_TIME=%.5f"
+                                % (tool_id, tool.pressure_advance, tool.pressure_advance_smooth_time,))
+
+    cmd_SAVE_TOOL_PRESSURE_ADVANCE_help = 'Save the pressure advance of a tool'
+    def cmd_SAVE_TOOL_PRESSURE_ADVANCE(self, gcmd):
+        tool_id = gcmd.get_int('TOOL', None, minval=0)
+        if tool_id is None:
+            raise gcmd.error('missing tool id')
+        self.save_tool_pressure_advance(tool_id)
+
+    def save_tool_pressure_advance(self, tool_id):
+        tool = self.printer.lookup_object('tool %d' % (tool_id,))
+        if tool is None:
+            return
+        save_variables = self.printer.lookup_object('save_variables')
+        pa_info = {
+            'pressure_advance': tool.pressure_advance,
+            'smooth_time': tool.pressure_advance_smooth_time,
+        }
+        save_variables.cmd_SAVE_VARIABLE(self.gcode.create_gcode_command(
+            "SAVE_VARIABLE", "SAVE_VARIABLE", {"VARIABLE": 'ktcc_tool_pa_info_%d' % (tool_id,), 'VALUE': pa_info}))
+
+    def load_tool_pressure_advance(self):
+        save_variables = self.printer.lookup_object('save_variables')
+        for name, value in save_variables.allVariables.items():
+            ktcc_tool_pa_info_prefix = 'ktcc_tool_pa_info_'
+            if name.startswith(ktcc_tool_pa_info_prefix):
+                tool_id = int(name[len(ktcc_tool_pa_info_prefix):]) # type: ignore
+                tool = self.printer.lookup_object('tool %d' % (tool_id,))
+                if tool is None:
+                    continue
+                try:
+                    tool.set_pressure_advance(
+                        pressure_advance=value.get('pressure_advance', 0.0), 
+                        smooth_time=value.get('smooth_time', 0.04), 
+                    )
+                except Exception as ex:
+                    self.log.always(f'failed to restore tool {tool_id} pressure advance: {ex}')
+                    
     cmd_TOOL_LOCK_help = "Lock the ToolLock."
     def cmd_TOOL_LOCK(self, gcmd = None):
         self.ToolLock()

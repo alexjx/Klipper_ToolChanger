@@ -76,6 +76,10 @@ class Tool:
         self.unretract_speed = 20.0
         self.zhop = 0.0
 
+        # Pressure Advance
+        self.pressure_advance = 0.0
+        self.pressure_advance_smooth_time = 0.4
+
         self.config = config
 
         # Under Consideration:
@@ -548,6 +552,29 @@ class Tool:
 
         self.log.debug("Tool %s: Firmware retract options applied." % self.name)
 
+    def set_pressure_advance(self, pressure_advance=None, smooth_time=None):
+        if pressure_advance is not None:
+            self.pressure_advance = pressure_advance
+        if smooth_time is not None:
+            self.smooth_time = smooth_time
+        if smooth_time or pressure_advance:
+            extruder = self.printer.lookup_object(self.extruder)
+            if extruder is None:
+                return
+            args = {}
+            if smooth_time is not None:
+                args['SMOOTH_TIME'] = smooth_time
+            if pressure_advance is not None:
+                args['ADVANCE'] = pressure_advance
+            if extruder.extruder_stepper is not None:
+                extruder.extruder_stepper.cmd_SET_PRESSURE_ADVANCE(
+                    self.gcode.create_gcode_command(
+                        'SET_PRESSURE_ADVANCE',
+                        'SET_PRESSURE_ADVANCE',
+                        args,
+                    )
+                )
+
     def set_offset(self, **kwargs):
         for i in kwargs:
             if i == "x_pos":
@@ -702,6 +729,8 @@ class Tool:
             "retract_speed": self.retract_speed,
             "unretract_extra_length": self.unretract_extra_length,
             "unretract_speed": self.unretract_speed,
+            "pressure_advance": self.pressure_advance,
+            "pressure_advance_smooth_time": self.pressure_advance_smooth_time,
         }
         return status
 

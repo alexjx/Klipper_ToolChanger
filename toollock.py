@@ -202,8 +202,6 @@ class ToolLock:
         # apply if it's current tool
         if tool_id == int(self.tool_current):
             tool.apply_retract_options()
-        # save to file
-        self.save_tool_retractions(tool_id)
     
     cmd_GET_TOOL_RETRACTION_help = 'Get retraction length of a tool or tools'
     def cmd_GET_TOOL_RETRACTION(self, gcmd):
@@ -263,8 +261,6 @@ class ToolLock:
 
         # send to the tool
         tool.set_pressure_advance(pressure_advance=pressure_advance, smooth_time=smooth_time)
-        # save to file
-        self.save_tool_pressure_advance(tool_id)
 
     cmd_GET_TOOL_PRESSURE_ADVANCE_help = 'Get pressure advance of a tool'
     def cmd_GET_TOOL_PRESSURE_ADVANCE(self, gcmd):

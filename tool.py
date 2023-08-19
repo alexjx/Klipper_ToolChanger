@@ -78,7 +78,7 @@ class Tool:
 
         # Pressure Advance
         self.pressure_advance = 0.0
-        self.pressure_advance_smooth_time = 0.4
+        self.pressure_advance_smooth_time = 0.04
 
         self.config = config
 

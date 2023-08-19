@@ -54,8 +54,9 @@ class ToolLock:
             'RESTORE_POSITION', 'KTCC_SET_GCODE_OFFSET_FOR_CURRENT_TOOL',
             'KTCC_DISPLAY_TOOL_MAP', 'KTCC_REMAP_TOOL', 'KTCC_ENDSTOP_QUERY',
             'KTCC_SET_ALL_TOOL_HEATERS_OFF', 'KTCC_RESUME_ALL_TOOL_HEATERS',
-            'SET_TOOL_RETRACTION', 'GET_TOOL_RETRACTION', 'SAVE_TOOL_OFFSET',
-            'SET_TOOL_PRESSURE_ADVANCE', 'GET_TOOL_PRESSURE_ADVANCE', 'SAVE_TOOL_PRESSURE_ADVANCE',
+            'KTCC_SET_TOOL_RETRACTION', 'KTCC_GET_TOOL_RETRACTION', 'KTCC_SAVE_TOOL_OFFSET',
+            'KTCC_SET_TOOL_PRESSURE_ADVANCE', 'KTCC_GET_TOOL_PRESSURE_ADVANCE', 
+            'KTCC_SAVE_TOOL_PRESSURE_ADVANCE', 'KTCC_APPLY_TOOL_RETRACTION',
         ]
         for cmd in handlers:
             func = getattr(self, 'cmd_' + cmd)
@@ -116,8 +117,8 @@ class ToolLock:
         save_variables.cmd_SAVE_VARIABLE(self.gcode.create_gcode_command(
             "SAVE_VARIABLE", "SAVE_VARIABLE", {"VARIABLE": 'ktcc_tool_offset_%d' % (tool_id,), 'VALUE': tool.get_offset()}))
 
-    cmd_SAVE_TOOL_OFFSET_help = 'Save the offset of a tool.'
-    def cmd_SAVE_TOOL_OFFSET(self, gcmd):
+    cmd_KTCC_SAVE_TOOL_OFFSET_help = 'Save the offset of a tool.'
+    def cmd_KTCC_SAVE_TOOL_OFFSET(self, gcmd):
         tool_id = gcmd.get_int('TOOL', None, minval=0)
         if tool_id is None:
             raise gcmd.error('missing tool id')
@@ -149,7 +150,7 @@ class ToolLock:
     def load_tool_retractions(self):
         save_variables = self.printer.lookup_object('save_variables')
         for name, value in save_variables.allVariables.items():
-            ktcc_retract_tool_prefix = 'ktcc_retract_tool_'
+            ktcc_retract_tool_prefix = 'ktcc_tool_retract_'
             if name.startswith(ktcc_retract_tool_prefix):
                 tool_id = int(name[len(ktcc_retract_tool_prefix):]) # type: ignore
                 tool = self.printer.lookup_object('tool %d' % (tool_id,))
@@ -157,10 +158,10 @@ class ToolLock:
                     continue
                 try:
                     tool.set_retract(
-                        retract_length=value.get('retract_length', 20.0), 
-                        retract_speed=value.get('retract_speed', 40.0), 
+                        retract_length=value.get('retract_length', 0.0), 
+                        retract_speed=value.get('retract_speed', 50.0), 
                         unretract_extra_length=value.get('unretract_extra_length', 0.0), 
-                        unretract_speed=value.get('unretract_speed', 40.0),
+                        unretract_speed=value.get('unretract_speed', 50.0),
                     )
                 except Exception as ex:
                     self.log.error(f'failed to restore tool {tool_id} offsets: {ex}')
@@ -177,15 +178,22 @@ class ToolLock:
             'unretract_speed': tool.unretract_speed,
         }
         save_variables.cmd_SAVE_VARIABLE(self.gcode.create_gcode_command(
-            "SAVE_VARIABLE", "SAVE_VARIABLE", {"VARIABLE": 'ktcc_retract_tool_%d' % (tool_id,), 'VALUE': retract_info}))
+            "SAVE_VARIABLE", "SAVE_VARIABLE", {"VARIABLE": 'ktcc_tool_retract_%d' % (tool_id,), 'VALUE': retract_info}))
 
-    cmd_SET_TOOL_RETRACTION_help = 'Set retraction length of tool or tools.'
-    def cmd_SET_TOOL_RETRACTION(self, gcmd):
+    cmd_KTCC_SAVE_TOOL_RETRACTION_help = 'Save the offset of a tool.'
+    def cmd_KTCC_SAVE_TOOL_RETRACTION(self, gcmd):
+        tool_id = gcmd.get_int('TOOL', None, minval=0)
+        if tool_id is None:
+            raise gcmd.error('missing tool id')
+        self.save_tool_retractions(tool_id)
+
+    cmd_KTCC_SET_TOOL_RETRACTION_help = 'Set retraction length of tool or tools.'
+    def cmd_KTCC_SET_TOOL_RETRACTION(self, gcmd):
         tool_id = gcmd.get_int('TOOL', None)
-        retract_length = gcmd.get_float('RETRACT_LENGTH', None)
-        retract_speed = gcmd.get_float('RETRACT_SPEED', None)
-        unretract_extra_length = gcmd.get_float('UNRETRACT_EXTRA', None)
-        unretract_speed = gcmd.get_float('UNRETRACT_SPEED', None)
+        retract_length = gcmd.get_float('LENGTH', None)
+        retract_speed = gcmd.get_float('SPEED', None)
+        unretract_extra_length = gcmd.get_float('EXTRA', None)
+        unretract_speed = gcmd.get_float('PRIME_SPEED', None)
         zhop = gcmd.get_float('ZHOP', None)
         if tool_id is None:
             raise gcmd.error('missing tool id')
@@ -202,9 +210,17 @@ class ToolLock:
         # apply if it's current tool
         if tool_id == int(self.tool_current):
             tool.apply_retract_options()
+        # persist tool
+        self.save_tool_retractions(tool_id)
+
+    cmd_KTCC_APPLY_TOOL_RETRACTION_help = 'Apply retraction length of tool or tools.'
+    def cmd_KTCC_APPLY_TOOL_RETRACTION(self, gcmd):
+        if int(self.tool_current) >= 0:
+            tool = self.printer.lookup_object('tool %d' % (int(self.tool_current),), None)
+            tool.apply_retract_options()
     
-    cmd_GET_TOOL_RETRACTION_help = 'Get retraction length of a tool or tools'
-    def cmd_GET_TOOL_RETRACTION(self, gcmd):
+    cmd_KTCC_GET_TOOL_RETRACTION_help = 'Get retraction length of a tool or tools'
+    def cmd_KTCC_GET_TOOL_RETRACTION(self, gcmd):
         tool_id = gcmd.get_int('TOOL', None)
         if tool_id is not None:
             tool = self.printer.lookup_object('tool %d' % (tool_id,), None)
@@ -229,8 +245,8 @@ class ToolLock:
                                     tool.unretract_extra_length, tool.unretract_speed,
                                     tool.zhop))
 
-    cmd_SET_TOOL_PRESSURE_ADVANCE_help = 'Set pressure advance of tool'
-    def cmd_SET_TOOL_PRESSURE_ADVANCE(self, gcmd):
+    cmd_KTCC_SET_TOOL_PRESSURE_ADVANCE_help = 'Set pressure advance of tool'
+    def cmd_KTCC_SET_TOOL_PRESSURE_ADVANCE(self, gcmd):
         tool_id = gcmd.get_int('TOOL', None)
         extruder_name = gcmd.get('EXTRUDER', None)
         if tool_id is None and extruder_name is None:
@@ -262,8 +278,8 @@ class ToolLock:
         # send to the tool
         tool.set_pressure_advance(pressure_advance=pressure_advance, smooth_time=smooth_time)
 
-    cmd_GET_TOOL_PRESSURE_ADVANCE_help = 'Get pressure advance of a tool'
-    def cmd_GET_TOOL_PRESSURE_ADVANCE(self, gcmd):
+    cmd_KTCC_GET_TOOL_PRESSURE_ADVANCE_help = 'Get pressure advance of a tool'
+    def cmd_KTCC_GET_TOOL_PRESSURE_ADVANCE(self, gcmd):
         tool_id = gcmd.get_int('TOOL', None)
         if tool_id is not None:
             tool = self.printer.lookup_object('tool %d' % (tool_id,), None)
@@ -280,8 +296,8 @@ class ToolLock:
             gcmd.respond_info("TOOL %d: ADANVCE=%.5f SMOOTH_TIME=%.5f"
                                 % (tool_id, tool.pressure_advance, tool.pressure_advance_smooth_time,))
 
-    cmd_SAVE_TOOL_PRESSURE_ADVANCE_help = 'Save the pressure advance of a tool'
-    def cmd_SAVE_TOOL_PRESSURE_ADVANCE(self, gcmd):
+    cmd_KTCC_SAVE_TOOL_PRESSURE_ADVANCE_help = 'Save the pressure advance of a tool'
+    def cmd_KTCC_SAVE_TOOL_PRESSURE_ADVANCE(self, gcmd):
         tool_id = gcmd.get_int('TOOL', None, minval=0)
         if tool_id is None:
             raise gcmd.error('missing tool id')

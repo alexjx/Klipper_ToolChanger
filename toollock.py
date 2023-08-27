@@ -197,12 +197,17 @@ class ToolLock:
         zhop = gcmd.get_float('ZHOP', None)
         if tool_id is None:
             raise gcmd.error('missing tool id')
-        if retract_length is not None and unretract_extra_length is not None and retract_speed is not None \
-            and unretract_speed is not None and zhop is not None:
-            raise gcmd.error('missing parameter')
         tool = self.printer.lookup_object('tool %d' % (tool_id,), None)
         if not tool:
             raise gcmd.error('invalid tool specified')
+        if retract_length is None:
+            retract_length = tool.retract_length
+        if unretract_extra_length is None:
+            unretract_extra_length = tool.unretract_extra_length
+        if retract_speed is None:
+            retract_speed = tool.retract_speed
+        if unretract_speed is None:
+            unretract_speed = tool.unretract_speed            
         # send to the tool
         tool.set_retract(retract_length=retract_length, retract_speed=retract_speed, 
                         unretract_extra_length=unretract_extra_length, 
@@ -294,7 +299,7 @@ class ToolLock:
             if not tool:
                 continue
             gcmd.respond_info("TOOL %d: ADANVCE=%.5f SMOOTH_TIME=%.5f"
-                                % (tool_id, tool.pressure_advance, tool.pressure_advance_smooth_time,))
+                                % (i, tool.pressure_advance, tool.pressure_advance_smooth_time,))
 
     cmd_KTCC_SAVE_TOOL_PRESSURE_ADVANCE_help = 'Save the pressure advance of a tool'
     def cmd_KTCC_SAVE_TOOL_PRESSURE_ADVANCE(self, gcmd):

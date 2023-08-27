@@ -556,7 +556,7 @@ class Tool:
         if pressure_advance is not None:
             self.pressure_advance = pressure_advance
         if smooth_time is not None:
-            self.smooth_time = smooth_time
+            self.pressure_advance_smooth_time = smooth_time
         if smooth_time or pressure_advance:
             extruder = self.printer.lookup_object(self.extruder)
             if extruder is None:

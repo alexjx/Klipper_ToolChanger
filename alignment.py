@@ -40,13 +40,13 @@ class AlignemntHelper:
         if len(self.z_samples) == 0:
             raise Exception('z axis not sampled')
         return sum(self.z_samples) / len(self.z_samples) # type: ignore
-    
+
     def get_xy(self):
         if len(self.xy_samples) == 0:
             raise Exception('xy axis not sampled')
         x = (self.xy_samples[0] + self.xy_samples[2]) / 2.0
         y = (self.xy_samples[1] + self.xy_samples[3]) / 2.0
-        
+
         # klipper apply following tranform with offsets
         #   x = toolhead_x - offset_x
         #   y = toolhead_y - offset_y
@@ -58,7 +58,7 @@ class AlignemntHelper:
         #   offset_y = toolhead_y - y = probed_y - probe_point_y
 
         return (x - self.probe_point[0], y - self.probe_point[1])
-    
+
     def tranform_to_machine_position(self, user_pos):
         return [p + o for p, o in zip(user_pos, self.tool.offset)]
 
@@ -109,7 +109,7 @@ class AlignemntHelper:
         self.toolhead.manual_move(start_pos, FAST_MOVE_SPEED_XY)
         self.toolhead.manual_move([None, None, probe_z], FAST_MOVE_SPEED_Z)
         self.toolhead.wait_moves()
-        
+
         # probe left
         epos = self.phoming.probing_move(self.probes.x, probe_center, FAST_PROBE_SPEED)
         self.toolhead.manual_move([epos[0] - PROBE_BACKOFF, None], FAST_MOVE_SPEED_XY) # back X a bit
@@ -173,7 +173,7 @@ class AlignemntHelper:
         # toolhead position is the machine position in RRF
         probe_tgt = self.tranform_to_machine_position([self.probe_point[0], self.probe_point[1], -DEFAULT_Z_OFFSET - 1.0])
         logging.info(f'tool {self.tool_id}: probing z from location {probe_tgt}')
-        
+
         pos = self.toolhead.get_position()
         probe_tgt.append(pos[3]) # probing_move requires 4th axis
 
@@ -190,7 +190,7 @@ class AlignemntHelper:
         # establish z axis position
         self.gcode.respond_info(f'tool {self.tool_id}: establishing z axis position')
         _do_probe(FAST_PROBE_SPEED, FAST_MOVE_SPEED_Z)
-        
+
         # probe z axis
         self.z_samples = []
         for i in range(n_samples):
@@ -222,11 +222,11 @@ class Alignment:
         logging.info(f'alignment: using pin {pin}')
         pin_params = ppins.lookup_pin(pin, can_invert=True, can_pullup=True)
         mcu = pin_params['chip']
-        
+
         mcu_endstop_x = mcu.setup_pin('endstop', pin_params)
         mcu_endstop_y = mcu.setup_pin('endstop', pin_params)
         mcu_endstop_z = mcu.setup_pin('endstop', pin_params)
-        
+
         query_endstops = self.printer.load_object(config, 'query_endstops')
         query_endstops.register_endstop(mcu_endstop_x, 'alignment_probe_x')
         query_endstops.register_endstop(mcu_endstop_y, 'alignment_probe_y')
@@ -236,14 +236,14 @@ class Alignment:
 
         self.printer.register_event_handler('klippy:mcu_identify',
                                             self._handle_mcu_identify)
-    
+
         self.gcode.register_command(
-            'KTCC_ALIGN_TOOLS', 
-            self.cmd_KTCC_ALIGN_TOOLS, 
-            False, 
+            'KTCC_ALIGN_TOOLS',
+            self.cmd_KTCC_ALIGN_TOOLS,
+            False,
             self.cmd_KTCC_ALIGN_TOOLS_help,
         )
-        
+
     def _handle_mcu_identify(self):
         # since we are doing alignment, we will register all 3 axes
         kin = self.printer.lookup_object('toolhead').get_kinematics()
@@ -268,7 +268,7 @@ class Alignment:
             )
 
         yield
-        
+
         # restore stepper current
         for axis, stepper in self.steppers.items():
             self.gcode.respond_info(f'restoring stepper current for axis {axis}')
@@ -276,7 +276,7 @@ class Alignment:
                 f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis]}\n'
                 'G4 P200\n'
             )
-    
+
     cmd_KTCC_ALIGN_TOOLS_help = "aligns mutiple tools"
     def cmd_KTCC_ALIGN_TOOLS(self, gcmd):
         tools_to_probe_str = gcmd.get('TOOLS', None)
@@ -310,12 +310,13 @@ class Alignment:
         ktcclog = self.printer.lookup_object('ktcclog')
 
         for tool_id in tools_to_probe:
-            for _ in range(n_retries):
+            for t in range(n_retries):
+                ktcclog.info(f'aligning tool {tool_id} for {t+1}/{n_retries}')
                 samples = []
                 for i in range(n_samples):
                     self.gcode.respond_info(f'probing tool {tool_id}, sample {i+1}/{n_samples}')
                     helper = AlignemntHelper(tool_id, probe_point, self.probes, self.printer)
-                    
+
                     helper.prepare()
                     # ktcc log will mesh up the probe results
                     with self.lower_stepper_current(), ktcclog.disable_save():
@@ -328,7 +329,7 @@ class Alignment:
 
                     self.gcode.respond_info(f'tool {tool_id}: sample {i+1}/{n_samples}: x={x:.4f}, y={y:.4f}, z={z:.4f}')
                     samples.append((x, y, z))
-                    
+
                 # calculate average
                 x_avg = sum([s[0] for s in samples]) / len(samples)
                 y_avg = sum([s[1] for s in samples]) / len(samples)
@@ -339,17 +340,17 @@ class Alignment:
                 z_mad = sum([abs(s[2] - z_avg) for s in samples]) / len(samples)
                 # print out results
                 self.gcode.respond_info(f'tool {tool_id}: x={x_avg:.4f}, y={y_avg:.4f}, z={z_avg:.4f} (x_mad={x_mad:.6f}, y_mad={y_mad:.6f}, z_mad={z_mad:.6f})')
-                
+
                 # check if we are within tolerance
                 if x_mad <= tolerance and y_mad <= tolerance and z_mad <= tolerance:
                     self.gcode.respond_info(f'tool {tool_id}: alignment successful')
                     self.gcode.run_script_from_command(f'SET_TOOL_OFFSET TOOL={tool_id} X={x_avg:.4f} Y={y_avg:.4f} Z={z_avg:.4f}')
                     if save_it:
-                        self.gcode.run_script_from_command(f'SAVE_TOOL_OFFSET TOOL={tool_id}')
+                        self.gcode.run_script_from_command(f'KTCC_SAVE_TOOL_OFFSET TOOL={tool_id}')
                     break
             else:
                 self.gcode.error(f'tool {tool_id}: alignment failed')
-                
-        
+
+
 def load_config(config):
     return Alignment(config)

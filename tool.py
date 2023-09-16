@@ -37,7 +37,7 @@ class Tool:
         self.meltzonelength = None          # Length of the meltzone for retracting and inserting filament on toolchange. 18mm for e3d Revo
         self.lazy_home_when_parking = None  # (default: 0 - disabled) - When set to 1, will home unhomed XY axes if needed and will not move any axis if already homed and parked. 2 Will also home Z if not homed.
                                             # Wipe. -1 = none, 1= Only load filament, 2= Wipe in front of carriage, 3= Pebble wiper, 4= First Silicone, then pebble. Defaults to None.
-        self.zone = None                    # Position of the parking zone in the format X, Y  
+        self.zone = None                    # Position of the parking zone in the format X, Y
         self.park = None                    # Position to move to when fully parking the tool in the dock in the format X, Y
         self.offset = None                  # Offset of the nozzle in the format X, Y, Z
 
@@ -118,11 +118,11 @@ class Tool:
         tg_status = self.toolgroup.get_status()
 
        ##### Is Virtual #####
-        self.is_virtual = config.getboolean('is_virtual', 
+        self.is_virtual = config.getboolean('is_virtual',
                                             tg_status["is_virtual"])
 
         ##### Physical Parent #####
-        self.physical_parent_id = config.getint('physical_parent', 
+        self.physical_parent_id = config.getint('physical_parent',
                                                 tg_status["physical_parent_id"])
         if self.physical_parent_id is None:
             self.physical_parent_id = self.TOOL_UNLOCKED
@@ -141,10 +141,10 @@ class Tool:
                     % (config.get_name()))
 
         ##### Extruder #####
-        self.extruder = config.get('extruder', pp_status['extruder'])      
+        self.extruder = config.get('extruder', pp_status['extruder'])
 
         ##### Fan #####
-        self.fan = config.get('fan', pp_status['fan'])                     
+        self.fan = config.get('fan', pp_status['fan'])
 
         ##### Meltzone Length #####
         self.meltzonelength = self._get_config_parameter_with_inheritence('meltzonelength', 0)
@@ -157,7 +157,7 @@ class Tool:
             self.zone = config.get('zone', pp_status['zone'])
             if not isinstance(self.zone, list):
                 self.zone = str(self.zone).split(',')
-            self.park = config.get('park', pp_status['park'])                  
+            self.park = config.get('park', pp_status['park'])
             if not isinstance(self.park, list):
                 self.park = str(self.park).split(',')
             self.offset = config.get('offset', pp_status['offset'])
@@ -182,12 +182,12 @@ class Tool:
                     % (config.get_name(), str(e)))
 
         # Tool specific input shaper parameters. Initiated with Klipper standard values where not specified.
-        self.shaper_freq_x = config.get('shaper_freq_x', pp_status['shaper_freq_x'])                     
-        self.shaper_freq_y = config.get('shaper_freq_y', pp_status['shaper_freq_y'])                     
-        self.shaper_type_x = config.get('shaper_type_x', pp_status['shaper_type_x'])                     
-        self.shaper_type_y = config.get('shaper_type_y', pp_status['shaper_type_y'])                     
-        self.shaper_damping_ratio_x = config.get('shaper_damping_ratio_x', pp_status['shaper_damping_ratio_x'])                     
-        self.shaper_damping_ratio_y = config.get('shaper_damping_ratio_y', pp_status['shaper_damping_ratio_y'])                     
+        self.shaper_freq_x = config.get('shaper_freq_x', pp_status['shaper_freq_x'])
+        self.shaper_freq_y = config.get('shaper_freq_y', pp_status['shaper_freq_y'])
+        self.shaper_type_x = config.get('shaper_type_x', pp_status['shaper_type_x'])
+        self.shaper_type_y = config.get('shaper_type_y', pp_status['shaper_type_y'])
+        self.shaper_damping_ratio_x = config.get('shaper_damping_ratio_x', pp_status['shaper_damping_ratio_x'])
+        self.shaper_damping_ratio_y = config.get('shaper_damping_ratio_y', pp_status['shaper_damping_ratio_y'])
 
         ##### Standby settings (if the tool has an extruder) #####
         if self.extruder is not None:
@@ -236,18 +236,18 @@ class Tool:
                 self.unload_virtual_at_dropoff = self.toolgroup.unload_virtual_at_dropoff
 
         logging.warn("T%s unload_virtual_at_dropoff: %s" % (str(self.name), str(self.requires_pickup_for_virtual_load)))
-            
+
         ##### Register Tool select command #####
         self.gcode.register_command("KTCC_T" + str(self.name), self.cmd_SelectTool, desc=self.cmd_SelectTool_help)
 
     def _get_bool_config_parameter_with_inheritence(self, config_param, default = None):
-        tmp = self.config.getboolean(config_param, self.pp.get_config(config_param))   
+        tmp = self.config.getboolean(config_param, self.pp.get_config(config_param))
         if tmp is None:
             tmp = self.toolgroup.get_config(config_param, default)
         return tmp
 
     def _get_config_parameter_with_inheritence(self, config_param, default = None):
-        tmp = self.config.get(config_param, self.pp.get_config(config_param))   
+        tmp = self.config.get(config_param, self.pp.get_config(config_param))
         if tmp is None:
             tmp = self.toolgroup.get_config(config_param, default)
         return tmp
@@ -267,7 +267,7 @@ class Tool:
     def get_config(self, config_param, default = None):
         if self.config is None: return None
         return self.config.get(config_param, default)
-        
+
     cmd_SelectTool_help = "Select Tool"
     def cmd_SelectTool(self, gcmd):
         self.log.trace("KTCC T" + str(self.name) + " Selected.")
@@ -283,7 +283,7 @@ class Tool:
             return
         else:
             self.select_tool_actual(param)
-            
+
 
     # To avoid recursive remaping.
     def select_tool_actual(self, param = None):
@@ -299,7 +299,7 @@ class Tool:
             msg = "TOOL_PICKUP: Unknown tool already mounted Can't park it before selecting new tool."
             self.log.always(msg)
             raise self.printer.command_error(msg)
-        
+
         self.log.increase_tool_statistics(self.name, 'toolmounts_started')
 
 
@@ -318,10 +318,10 @@ class Tool:
             self.log.track_selected_tool_end(current_tool_id) # Log that the current tool is to be unmounted.
 
             current_tool = self.printer.lookup_object('tool ' + str(current_tool_id))
-           
+
             # If the next tool is not another virtual tool on the same physical tool.
-            if int(self.physical_parent_id ==  self.TOOL_UNLOCKED or 
-                        self.physical_parent_id) !=  int( 
+            if int(self.physical_parent_id ==  self.TOOL_UNLOCKED or
+                        self.physical_parent_id) !=  int(
                         current_tool.get_status()["physical_parent_id"]
                         ):
                 self.log.info("Will Dropoff():%s" % str(current_tool_id))
@@ -392,9 +392,9 @@ class Tool:
         # If has an extruder then activate that extruder.
         if self.extruder is not None:
             self.gcode.run_script_from_command(
-                "ACTIVATE_EXTRUDER extruder=%s" % 
+                "ACTIVATE_EXTRUDER extruder=%s" %
                 (self.extruder))
-            
+
         # apply new retraction options
         self.apply_retract_options()
 
@@ -518,7 +518,7 @@ class Tool:
         self.toollock.SaveCurrentTool(self.name)
         self.log.trace("Virtual T%d Unloaded" % (int(self.name)))
 
-        self.log.track_unmount_end(self.name)                 # Log the time it takes for tool unload. 
+        self.log.track_unmount_end(self.name)                 # Log the time it takes for tool unload.
 
     def set_retract(self, retract_length=None, retract_speed=None, unretract_extra_length=None, unretract_speed=None, zhop=None):
         if retract_length is not None:
@@ -539,8 +539,8 @@ class Tool:
 
         self.firmware_retract.cmd_SET_RETRACTION(
             self.gcode.create_gcode_command(
-                "SET_RETRACTION", 
-                "SET_RETRACTION", 
+                "SET_RETRACTION",
+                "SET_RETRACTION",
                 {
                     "RETRACT_LENGTH": self.retract_length,
                     "RETRACT_SPEED": self.retract_speed,
@@ -550,14 +550,12 @@ class Tool:
             )
         )
 
-        self.log.debug("Tool %s: Firmware retract options applied." % self.name)
-
     def set_pressure_advance(self, pressure_advance=None, smooth_time=None):
         if pressure_advance is not None:
             self.pressure_advance = pressure_advance
         if smooth_time is not None:
             self.pressure_advance_smooth_time = smooth_time
-        if smooth_time or pressure_advance:
+        if smooth_time is not None or pressure_advance is not None:
             extruder = self.printer.lookup_object(self.extruder)
             if extruder is None:
                 return
@@ -611,7 +609,7 @@ class Tool:
         heater = self.printer.lookup_object(self.extruder).get_heater()
         curtime = self.printer.get_reactor().monotonic()
         changing_timer = False
-        
+
         # self is always pointing to virtual tool but its timers and extruder are always pointing to the physical tool. When changing multiple virtual tools heaters the statistics can remain open when changing by timers of the parent if another one got in between.
         # Therefore it's important for all heater statistics to only point to physical parent.
 
@@ -779,10 +777,10 @@ class ToolStandbyTempTimer:
 
 
             self.log.trace(
-                "_standby_tool_temp_timer_event: Running for T%s. temp_type:%s. %s" % 
-                (str(self.tool_id), 
-                 "Time to shutdown" if self.temp_type == 0 else "Time to standby", 
-                 ("For virtual tool T%s" % str(self.last_virtual_tool_using_physical_timer) ) 
+                "_standby_tool_temp_timer_event: Running for T%s. temp_type:%s. %s" %
+                (str(self.tool_id),
+                 "Time to shutdown" if self.temp_type == 0 else "Time to standby",
+                 ("For virtual tool T%s" % str(self.last_virtual_tool_using_physical_timer) )
                  if  self.last_virtual_tool_using_physical_timer != self.tool_id else ""))
 
             temperature = 0
@@ -805,7 +803,7 @@ class ToolStandbyTempTimer:
             self.log.track_active_heater_end(self.tool_id)                                               # Set the active as finishes in statistics.
 
         except Exception as e:
-            raise Exception("Failed to set Standby temp for tool T%s: %s. %s" % (str(self.tool_id), 
+            raise Exception("Failed to set Standby temp for tool T%s: %s. %s" % (str(self.tool_id),
                                                                                  ("for virtual T%s" % str(self.last_virtual_tool_using_physical_timer)),
                                                                                  str(e)))  # if actual_tool_calling != self.tool_id else ""
 
@@ -819,9 +817,9 @@ class ToolStandbyTempTimer:
     def set_timer(self, duration, actual_tool_calling):
         actual_tool_calling = actual_tool_calling
         self.log.trace(str(self.timer_handler) + ".set_timer: T%s %s, temp_type:%s, duration:%s." % (
-            str(self.tool_id), 
+            str(self.tool_id),
             ("for virtual T%s" % str(actual_tool_calling)) if actual_tool_calling != self.tool_id else "",
-            ("Standby" if self.temp_type == 1 else "OFF"), 
+            ("Standby" if self.temp_type == 1 else "OFF"),
             str(duration)))
         self.duration = float(duration)
         self.last_virtual_tool_using_physical_timer = actual_tool_calling
@@ -853,7 +851,7 @@ class ToolStandbyTempTimer:
             return str( self.nextwake - self.reactor.monotonic() )
 
 
-    # Todo: 
+    # Todo:
     # Inspired by https://github.com/jschuh/klipper-macros/blob/main/layers.cfg
 class MeanLayerTime:
     def __init__(self, printer):

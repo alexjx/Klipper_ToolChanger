@@ -48,14 +48,14 @@ class ToolLock:
         # Register commands
         handlers = [
             'SAVE_CURRENT_TOOL', 'TOOL_LOCK', 'TOOL_UNLOCK',
-            'KTCC_TOOL_DROPOFF_ALL', 'SET_AND_SAVE_FAN_SPEED', 'TEMPERATURE_WAIT_WITH_TOLERANCE', 
+            'KTCC_TOOL_DROPOFF_ALL', 'SET_AND_SAVE_FAN_SPEED', 'TEMPERATURE_WAIT_WITH_TOLERANCE',
             'SET_TOOL_TEMPERATURE', 'SET_GLOBAL_OFFSET', 'SET_TOOL_OFFSET',
-            'SET_PURGE_ON_TOOLCHANGE', 'SAVE_POSITION', 'SAVE_CURRENT_POSITION', 
+            'SET_PURGE_ON_TOOLCHANGE', 'SAVE_POSITION', 'SAVE_CURRENT_POSITION',
             'RESTORE_POSITION', 'KTCC_SET_GCODE_OFFSET_FOR_CURRENT_TOOL',
             'KTCC_DISPLAY_TOOL_MAP', 'KTCC_REMAP_TOOL', 'KTCC_ENDSTOP_QUERY',
             'KTCC_SET_ALL_TOOL_HEATERS_OFF', 'KTCC_RESUME_ALL_TOOL_HEATERS',
             'KTCC_SET_TOOL_RETRACTION', 'KTCC_GET_TOOL_RETRACTION', 'KTCC_SAVE_TOOL_OFFSET',
-            'KTCC_SET_TOOL_PRESSURE_ADVANCE', 'KTCC_GET_TOOL_PRESSURE_ADVANCE', 
+            'KTCC_SET_TOOL_PRESSURE_ADVANCE', 'KTCC_GET_TOOL_PRESSURE_ADVANCE',
             'KTCC_SAVE_TOOL_PRESSURE_ADVANCE', 'KTCC_APPLY_TOOL_RETRACTION',
         ]
         for cmd in handlers:
@@ -108,7 +108,7 @@ class ToolLock:
                     tool.set_offset(x_pos=value[0], y_pos=value[1], z_pos=value[2])
                 except Exception as ex:
                     self.log.error(f'failed to restore tool {tool_id} offsets: {ex}')
-                    
+
     def save_tool_offsets(self, tool_id):
         tool = self.printer.lookup_object('tool %d' % (tool_id,))
         if tool is None:
@@ -123,7 +123,7 @@ class ToolLock:
         if tool_id is None:
             raise gcmd.error('missing tool id')
         self.save_tool_offsets(tool_id)
-    
+
     def Initialize_Tool_Lock(self):
         if not self.init_printer_to_last_tool:
             return None
@@ -145,7 +145,7 @@ class ToolLock:
             t = self.tool_current
             self.ToolLock(True)
             self.SaveCurrentTool(str(t))
-            self.log.always("ToolLock initialized with T%s." % self.tool_current) 
+            self.log.always("ToolLock initialized with T%s." % self.tool_current)
 
     def load_tool_retractions(self):
         save_variables = self.printer.lookup_object('save_variables')
@@ -158,14 +158,14 @@ class ToolLock:
                     continue
                 try:
                     tool.set_retract(
-                        retract_length=value.get('retract_length', 0.0), 
-                        retract_speed=value.get('retract_speed', 50.0), 
-                        unretract_extra_length=value.get('unretract_extra_length', 0.0), 
+                        retract_length=value.get('retract_length', 0.0),
+                        retract_speed=value.get('retract_speed', 50.0),
+                        unretract_extra_length=value.get('unretract_extra_length', 0.0),
                         unretract_speed=value.get('unretract_speed', 50.0),
                     )
                 except Exception as ex:
                     self.log.error(f'failed to restore tool {tool_id} offsets: {ex}')
-                    
+
     def save_tool_retractions(self, tool_id):
         tool = self.printer.lookup_object('tool %d' % (tool_id,))
         if tool is None:
@@ -179,13 +179,7 @@ class ToolLock:
         }
         save_variables.cmd_SAVE_VARIABLE(self.gcode.create_gcode_command(
             "SAVE_VARIABLE", "SAVE_VARIABLE", {"VARIABLE": 'ktcc_tool_retract_%d' % (tool_id,), 'VALUE': retract_info}))
-
-    cmd_KTCC_SAVE_TOOL_RETRACTION_help = 'Save the offset of a tool.'
-    def cmd_KTCC_SAVE_TOOL_RETRACTION(self, gcmd):
-        tool_id = gcmd.get_int('TOOL', None, minval=0)
-        if tool_id is None:
-            raise gcmd.error('missing tool id')
-        self.save_tool_retractions(tool_id)
+        self.log.trace(f'saved tool {tool_id} retraction: {retract_info}')
 
     cmd_KTCC_SET_TOOL_RETRACTION_help = 'Set retraction length of tool or tools.'
     def cmd_KTCC_SET_TOOL_RETRACTION(self, gcmd):
@@ -196,7 +190,9 @@ class ToolLock:
         unretract_speed = gcmd.get_float('PRIME_SPEED', None)
         zhop = gcmd.get_float('ZHOP', None)
         if tool_id is None:
-            raise gcmd.error('missing tool id')
+            tool_id = int(self.tool_current)
+            if tool_id < 0:
+                raise gcmd.error('missing tool id')
         tool = self.printer.lookup_object('tool %d' % (tool_id,), None)
         if not tool:
             raise gcmd.error('invalid tool specified')
@@ -207,10 +203,10 @@ class ToolLock:
         if retract_speed is None:
             retract_speed = tool.retract_speed
         if unretract_speed is None:
-            unretract_speed = tool.unretract_speed            
+            unretract_speed = tool.unretract_speed
         # send to the tool
-        tool.set_retract(retract_length=retract_length, retract_speed=retract_speed, 
-                        unretract_extra_length=unretract_extra_length, 
+        tool.set_retract(retract_length=retract_length, retract_speed=retract_speed,
+                        unretract_extra_length=unretract_extra_length,
                         unretract_speed=unretract_speed, zhop=zhop)
         # apply if it's current tool
         if tool_id == int(self.tool_current):
@@ -223,7 +219,7 @@ class ToolLock:
         if int(self.tool_current) >= 0:
             tool = self.printer.lookup_object('tool %d' % (int(self.tool_current),), None)
             tool.apply_retract_options()
-    
+
     cmd_KTCC_GET_TOOL_RETRACTION_help = 'Get retraction length of a tool or tools'
     def cmd_KTCC_GET_TOOL_RETRACTION(self, gcmd):
         tool_id = gcmd.get_int('TOOL', None)
@@ -233,7 +229,7 @@ class ToolLock:
                 raise gcmd.error('invalid tool specified')
             gcmd.respond_info("TOOL %d: RETRACT_LENGTH=%.5f RETRACT_SPEED=%.5f"
                                 " UNRETRACT_EXTRA_LENGTH=%.5f UNRETRACT_SPEED=%.5f"
-                                " ZHOP=%.5f" 
+                                " ZHOP=%.5f"
                                 % (tool_id, tool.retract_length, tool.retract_speed,
                                     tool.unretract_extra_length, tool.unretract_speed,
                                     tool.zhop))
@@ -245,7 +241,7 @@ class ToolLock:
                 continue
             gcmd.respond_info("TOOL %d: RETRACT_LENGTH=%.5f RETRACT_SPEED=%.5f"
                                 " UNRETRACT_EXTRA_LENGTH=%.5f UNRETRACT_SPEED=%.5f"
-                                " ZHOP=%.5f" 
+                                " ZHOP=%.5f"
                                 % (i, tool.retract_length, tool.retract_speed,
                                     tool.unretract_extra_length, tool.unretract_speed,
                                     tool.zhop))
@@ -331,12 +327,12 @@ class ToolLock:
                     continue
                 try:
                     tool.set_pressure_advance(
-                        pressure_advance=value.get('pressure_advance', 0.0), 
-                        smooth_time=value.get('smooth_time', 0.04), 
+                        pressure_advance=value.get('pressure_advance', 0.0),
+                        smooth_time=value.get('smooth_time', 0.04),
                     )
                 except Exception as ex:
                     self.log.always(f'failed to restore tool {tool_id} pressure advance: {ex}')
-                    
+
     cmd_TOOL_LOCK_help = "Lock the ToolLock."
     def cmd_TOOL_LOCK(self, gcmd = None):
         self.ToolLock()
@@ -350,7 +346,7 @@ class ToolLock:
             self.SaveCurrentTool("-2")
             self.log.trace("Tool Locked")
             self.log.increase_statistics('total_toollocks')
-            
+
 
     cmd_KTCC_TOOL_DROPOFF_ALL_help = "Deselect all tools"
     def cmd_KTCC_TOOL_DROPOFF_ALL(self, gcmd = None):
@@ -359,7 +355,7 @@ class ToolLock:
             raise self.printer.command_error("cmd_KTCC_TOOL_DROPOFF_ALL: Unknown tool already mounted Can't park unknown tool.")
         if self.tool_current != "-1":
             self.printer.lookup_object('tool ' + str(self.tool_current)).Dropoff( force_virtual_unload = True )
-        
+
 
         try:
             # Need to check all tools at least once but reload them after each time.
@@ -402,7 +398,7 @@ class ToolLock:
 
         axes_to_home = ""
         for axis in ['x', 'y', 'z']:
-            if axis not in homed: 
+            if axis not in homed:
                 axes_to_home += axis
         self.gcode.run_script_from_command("G28 " + axes_to_home.upper())
         return True
@@ -438,10 +434,10 @@ class ToolLock:
         self.SetAndSaveFanSpeed(tool_id, fanspeed)
 
     #
-    # Todo: 
+    # Todo:
     # Implement Fan Scale. Inspired by https://github.com/jschuh/klipper-macros/blob/main/fans.cfg
     # Can change fan scale for diffrent materials or tools from slicer. Maybe max and min too?
-    #    
+    #
     def SetAndSaveFanSpeed(self, tool_id, fanspeed):
         # Check if the requested tool has been remaped to another one.
         tool_is_remaped = self.tool_is_remaped(int(tool_id))
@@ -456,8 +452,8 @@ class ToolLock:
         else:
             self.SaveFanSpeed(fanspeed)
             self.gcode.run_script_from_command(
-                "SET_FAN_SPEED FAN=%s SPEED=%f" % 
-                (tool.fan, 
+                "SET_FAN_SPEED FAN=%s SPEED=%f" %
+                (tool.fan,
                 fanspeed))
 
     cmd_TEMPERATURE_WAIT_WITH_TOLERANCE_help = "Waits for current tool temperature, or a specified (TOOL) tool or (HEATER) heater's temperature within (TOLERANCE) tolerance."
@@ -510,12 +506,12 @@ class ToolLock:
         target_temp = int(self.printer.lookup_object(       # Get the heaters target temperature.
                     heater_name).get_status(curtime)["target"]
                           )
-        
+
         if target_temp > 40:                                # Only wait if set temperature is over 40*C
             self.log.always("Wait for heater " + heater_name + " to reach " + str(target_temp) + " with a tolerance of " + str(tolerance) + ".")
             self.gcode.run_script_from_command(
-                "TEMPERATURE_WAIT SENSOR=" + heater_name + 
-                " MINIMUM=" + str(target_temp - tolerance) + 
+                "TEMPERATURE_WAIT SENSOR=" + heater_name +
+                " MINIMUM=" + str(target_temp - tolerance) +
                 " MAXIMUM=" + str(target_temp + tolerance) )
             self.log.always("Wait for heater " + heater_name + " complete.")
 
@@ -689,7 +685,7 @@ class ToolLock:
         save_variables = self.printer.lookup_object('save_variables')
         save_variables.cmd_SAVE_VARIABLE(self.gcode.create_gcode_command(
             "SAVE_VARIABLE", "SAVE_VARIABLE", {"VARIABLE": "ktcc_global_offset", 'VALUE': self.global_offset }))
-        
+
     def load_global_offset(self):
         save_variables = self.printer.lookup_object('save_variables')
         self.global_offset = [p for p in save_variables.allVariables.get('ktcc_global_offset', [0,0,0])]
@@ -705,7 +701,7 @@ class ToolLock:
 
     def SaveFanSpeed(self, fanspeed):
         self.saved_fan_speed = float(fanspeed)
-       
+
     cmd_SAVE_POSITION_help = "Save the specified G-Code position."
 #  Sets the Restore type and saves specified position.
 #   With no parameters it will set Restore type to 0, no restore.
@@ -733,7 +729,7 @@ class ToolLock:
 
 
     cmd_SAVE_CURRENT_POSITION_help = "Save the current G-Code position."
-#  Saves current position. 
+#  Saves current position.
 #  RESTORE_POSITION_TYPE= Type of restore, optional. If not specified, restore_position_on_toolchange_type will not be changed.
 #    0: No restore
 #    1: Restore XY
@@ -747,12 +743,12 @@ class ToolLock:
         if restore_position_type is not None:
             if restore_position_type in [ 0, 1, 2 ]:
                 self.restore_position_on_toolchange_type = restore_position_type
-        
+
         gcode_move = self.printer.lookup_object('gcode_move')
         self.saved_position = gcode_move._get_gcode_position()
 
     cmd_RESTORE_POSITION_help = "Restore a previously saved G-Code position if it was specified in the toolchange T# command."
-#  Restores the previously saved possition according to 
+#  Restores the previously saved possition according to
 #   With no parameters it will Restore to previousley saved type.
 #  RESTORE_POSITION_TYPE= Type of restore, optional. If not specified, previousley saved restore_position_on_toolchange_type will be used.
 #    0: No restore

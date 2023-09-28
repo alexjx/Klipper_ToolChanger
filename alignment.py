@@ -32,6 +32,7 @@ class AlignemntHelper:
         self.gcode = self.printer.lookup_object('gcode')
         self.phoming = self.printer.lookup_object('homing')
         self.toolhead = self.printer.lookup_object('toolhead')
+        self.reactor = self.printer.get_reactor()
 
         self.z_samples = []
         self.xy_samples = []
@@ -263,7 +264,7 @@ class Alignment:
             self.gcode.respond_info(f'lowering stepper current for axis {axis}')
             run_current[axis] = stepper.get_status()['run_current']
             self.gcode.run_script_from_command(
-                f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.4:.4f}\n'
+                f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.5:.4f}\n'
                 'G4 P200\n'
             )
 

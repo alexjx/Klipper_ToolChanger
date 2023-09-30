@@ -444,11 +444,6 @@ class Tool:
             self.log.always("Tool.Dropoff: Printer not homed and Lazy homing option is: " + str(self.lazy_home_when_parking))
             return None
 
-        # Turn off fan if has a fan.
-        if self.fan is not None:
-            self.gcode.run_script_from_command(
-                "SET_FAN_SPEED FAN=" + self.fan + " SPEED=0" )
-
         # Check if this is a virtual tool.
         self.log.trace("Dropoff: T" + str(self.name) + "- is_virtual: " + str(self.is_virtual))
         if self.is_virtual:
@@ -467,6 +462,14 @@ class Tool:
             self.dropoff_gcode_template.run_gcode_from_command(context)
         except Exception as e:
             raise Exception("Dropoff gcode: Script running error: %s" % (str(e)))
+
+        # Turn off fan if has a fan.
+        if self.fan is not None:
+            # wait all move finish before change fan
+            toolhead = self.printer.lookup_object('toolhead')
+            toolhead.wait_moves()
+            self.gcode.run_script_from_command(
+                "SET_FAN_SPEED FAN=" + self.fan + " SPEED=0" )
 
         self.toollock.SaveCurrentTool(self.TOOL_UNLOCKED)   # Dropoff successfull
         self.log.track_unmount_end(self.name)                 # Log the time it takes for tool change.

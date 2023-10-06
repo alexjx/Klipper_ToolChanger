@@ -50,6 +50,7 @@ class ToolLock:
             'SAVE_CURRENT_TOOL', 'TOOL_LOCK', 'TOOL_UNLOCK',
             'KTCC_TOOL_DROPOFF_ALL', 'SET_AND_SAVE_FAN_SPEED', 'TEMPERATURE_WAIT_WITH_TOLERANCE',
             'SET_TOOL_TEMPERATURE', 'SET_GLOBAL_OFFSET', 'SET_TOOL_OFFSET',
+            'GET_GLOBAL_OFFSET', 'GET_TOOL_OFFSET',
             'SET_PURGE_ON_TOOLCHANGE', 'SAVE_POSITION', 'SAVE_CURRENT_POSITION',
             'RESTORE_POSITION', 'KTCC_SET_GCODE_OFFSET_FOR_CURRENT_TOOL',
             'KTCC_DISPLAY_TOOL_MAP', 'KTCC_REMAP_TOOL', 'KTCC_ENDSTOP_QUERY',
@@ -602,7 +603,7 @@ class ToolLock:
                     continue
                 self.log.trace("set_all_tool_heaters_off: T%s saved with heater_state: %str." % ( str(tool_name), str(tool.get_status()["heater_state"])))
                 self.changes_made_by_set_all_tool_heaters_off[tool_name] = tool.get_status()["heater_state"]
-                tool.set_heater(heater_state = 0)
+                tool.set_heater(heater_state = 0, heater_active_temp = 0, heater_standby_temp = 0)
         except Exception as e:
             raise Exception('set_all_tool_heaters_off: Error: %s' % str(e))
 
@@ -656,6 +657,15 @@ class ToolLock:
         if len(set_offset_cmd) > 0:
             tool.set_offset(**set_offset_cmd)
 
+    cmd_GET_TOOL_OFFSET_help = "Get an individual tool offset"
+    def cmd_GET_TOOL_OFFSET(self, gcmd):
+        tool_id = self._get_tool_id_from_gcmd(gcmd)
+        if tool_id is None:
+            return
+        tool = self.printer.lookup_object("tool " + str(tool_id))
+        offset = tool.get_offset()
+        gcmd.respond_info("TOOL %d: OFFSET=%.5f,%.5f,%.5f" % (tool_id, offset[0], offset[1], offset[2]))
+
     cmd_SET_GLOBAL_OFFSET_help = "Set the global tool offset"
     def cmd_SET_GLOBAL_OFFSET(self, gcmd):
         x_pos = gcmd.get_float('X', None)
@@ -680,6 +690,10 @@ class ToolLock:
 
         self.log.trace("Global offset now set to: %f, %f, %f." % (float(self.global_offset[0]), float(self.global_offset[1]), float(self.global_offset[2])))
         self.save_global_offset()
+
+    cmd_GET_GLOBAL_OFFSET_help = "Get the global tool offset"
+    def cmd_GET_GLOBAL_OFFSET(self, gcmd):
+        gcmd.respond_info(f"Offset is: {self.global_offset[0]} {self.global_offset[1]} {self.global_offset[2]}")
 
     def save_global_offset(self):
         save_variables = self.printer.lookup_object('save_variables')

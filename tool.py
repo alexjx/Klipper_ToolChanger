@@ -320,10 +320,7 @@ class Tool:
             current_tool = self.printer.lookup_object('tool ' + str(current_tool_id))
 
             # If the next tool is not another virtual tool on the same physical tool.
-            if int(self.physical_parent_id ==  self.TOOL_UNLOCKED or
-                        self.physical_parent_id) !=  int(
-                        current_tool.get_status()["physical_parent_id"]
-                        ):
+            if int(self.physical_parent_id) ==  self.TOOL_UNLOCKED or self.physical_parent_id != int(current_tool.get_status()["physical_parent_id"]):
                 self.log.info("Will Dropoff():%s" % str(current_tool_id))
                 current_tool.Dropoff()
                 current_tool_id = self.TOOL_UNLOCKED

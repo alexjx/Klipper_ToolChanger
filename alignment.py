@@ -17,6 +17,7 @@ FAST_MOVE_SPEED_Z = 10.0
 PROBE_BACKOFF = 0.5
 XY_PROBE_DEPTH = 1.0
 XY_PROBE_OFFSET = 10.0
+DWELL_TIME = 0.5
 
 Probes = namedtuple('Probes', ['x', 'y', 'z'])
 
@@ -112,9 +113,11 @@ class AlignemntHelper:
         self.toolhead.wait_moves()
 
         # probe left
+        self.toolhead.dwell(DWELL_TIME)
         epos = self.phoming.probing_move(self.probes.x, probe_center, FAST_PROBE_SPEED)
         self.toolhead.manual_move([epos[0] - PROBE_BACKOFF, None], FAST_MOVE_SPEED_XY) # back X a bit
         self.toolhead.wait_moves()
+        self.toolhead.dwell(DWELL_TIME)
         epos = self.phoming.probing_move(self.probes.x, probe_center, PROBE_SPEED)
         self.gcode.respond_info(f'tool {self.tool_id}: left probed at X={epos[0]:.4f}')
         results.append(epos[0])
@@ -128,9 +131,11 @@ class AlignemntHelper:
         self.toolhead.wait_moves()
 
         # probe front
+        self.toolhead.dwell(DWELL_TIME)
         epos = self.phoming.probing_move(self.probes.y, probe_center, FAST_PROBE_SPEED)
         self.toolhead.manual_move([None, epos[1] - PROBE_BACKOFF], FAST_MOVE_SPEED_XY) # back Y a bit
         self.toolhead.wait_moves()
+        self.toolhead.dwell(DWELL_TIME)
         epos = self.phoming.probing_move(self.probes.y, probe_center, PROBE_SPEED)
         self.gcode.respond_info(f'tool {self.tool_id}: front probed at Y={epos[1]:.4f}')
         results.append(epos[1])
@@ -144,9 +149,11 @@ class AlignemntHelper:
         self.toolhead.wait_moves()
 
         # probe right
+        self.toolhead.dwell(DWELL_TIME)
         epos = self.phoming.probing_move(self.probes.x, probe_center, FAST_PROBE_SPEED)
         self.toolhead.manual_move([epos[0] + PROBE_BACKOFF, None], FAST_MOVE_SPEED_XY)
         self.toolhead.wait_moves()
+        self.toolhead.dwell(DWELL_TIME)
         epos = self.phoming.probing_move(self.probes.x, probe_center, PROBE_SPEED)
         self.gcode.respond_info(f'tool {self.tool_id}: right probed at X={epos[0]:.4f}')
         results.append(epos[0])
@@ -160,9 +167,11 @@ class AlignemntHelper:
         self.toolhead.wait_moves()
 
         # probe back
+        self.toolhead.dwell(DWELL_TIME)
         epos = self.phoming.probing_move(self.probes.y, probe_center, FAST_PROBE_SPEED)
         self.toolhead.manual_move([None, epos[1] + PROBE_BACKOFF], FAST_MOVE_SPEED_XY)
         self.toolhead.wait_moves()
+        self.toolhead.dwell(DWELL_TIME)
         epos = self.phoming.probing_move(self.probes.y, probe_center, PROBE_SPEED)
         self.gcode.respond_info(f'tool {self.tool_id}: back probed at Y={epos[1]:.4f}')
         results.append(epos[1])
@@ -263,10 +272,16 @@ class Alignment:
         for axis, stepper in self.steppers.items():
             self.gcode.respond_info(f'lowering stepper current for axis {axis}')
             run_current[axis] = stepper.get_status()['run_current']
-            self.gcode.run_script_from_command(
-                f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.5:.4f}\n'
-                'G4 P200\n'
-            )
+            if axis == 'z':
+                self.gcode.run_script_from_command(
+                    f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.6:.4f}\n'
+                    'G4 P200\n'
+                )
+            else:
+                self.gcode.run_script_from_command(
+                    f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.5:.4f}\n'
+                    'G4 P200\n'
+                )
 
         yield
 

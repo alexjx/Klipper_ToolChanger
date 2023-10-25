@@ -664,7 +664,7 @@ class ToolLock:
             return
         tool = self.printer.lookup_object("tool " + str(tool_id))
         offset = tool.get_offset()
-        gcmd.respond_info("TOOL %d: OFFSET=%.5f,%.5f,%.5f" % (tool_id, offset[0], offset[1], offset[2]))
+        gcmd.respond_info(f"TOOL {tool_id}: OFFSET={offset[0]}, {offset[1]}, {offset[2]}")
 
     cmd_SET_GLOBAL_OFFSET_help = "Set the global tool offset"
     def cmd_SET_GLOBAL_OFFSET(self, gcmd):

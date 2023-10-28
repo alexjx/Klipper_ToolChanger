@@ -17,7 +17,7 @@ FAST_MOVE_SPEED_Z = 10.0
 PROBE_BACKOFF = 0.5
 XY_PROBE_DEPTH = 1.0
 XY_PROBE_OFFSET = 10.0
-DWELL_TIME = 0.5
+DWELL_TIME = 0.8
 
 Probes = namedtuple('Probes', ['x', 'y', 'z'])
 
@@ -73,7 +73,7 @@ class AlignemntHelper:
             'G90\n'
             'G28 Z\n'
             f'SET_TOOL_OFFSET TOOL={self.tool_id} X={DEFAULT_X_OFFSET} Y={DEFAULT_Y_OFFSET} Z={DEFAULT_Z_OFFSET}\n'
-            f'T{self.tool_id}\n'
+            f'KTCC_T{self.tool_id}\n'
             f'G0 X{self.probe_point[0]} Y{self.probe_point[1]} F12000\n'
             'M400\n'
         )

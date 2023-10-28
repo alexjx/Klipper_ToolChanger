@@ -552,7 +552,6 @@ class ToolLock:
         stdb_timeout = gcmd.get_float('STDB_TIMEOUT', None, minval=0)
         shtdwn_timeout = gcmd.get_float('SHTDWN_TIMEOUT', None, minval=0)
 
-
         if self.printer.lookup_object("tool " + str(tool_id)).get_status()["extruder"] is None:
             self.log.trace("cmd_SET_TOOL_TEMPERATURE: T%s has no extruder! Nothing to do." % str(tool_id))
             return None

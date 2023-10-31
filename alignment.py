@@ -284,12 +284,12 @@ class Alignment:
             if axis == 'z':
                 self.gcode.run_script_from_command(
                     f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.6:.2f}\n'
-                    'G4 P1000\n'
+                    'G4 P600\n'
                 )
             else:
                 self.gcode.run_script_from_command(
                     f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.4:.2f}\n'
-                    'G4 P1000\n'
+                    'G4 P600\n'
                 )
 
         yield
@@ -299,7 +299,7 @@ class Alignment:
             self.gcode.respond_info(f'restoring stepper current for axis {axis}')
             self.gcode.run_script_from_command(
                 f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis]}\n'
-                'G4 P1000\n'
+                'G4 P600\n'
             )
 
     cmd_KTCC_ALIGN_TOOLS_help = "aligns mutiple tools"

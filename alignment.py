@@ -17,7 +17,7 @@ FAST_MOVE_SPEED_Z = 10.0
 PROBE_BACKOFF = 0.5
 XY_PROBE_DEPTH = 1.0
 XY_PROBE_OFFSET = 10.0
-DWELL_TIME = 0.8
+DWELL_TIME = 0.8 # this used to avoid klipper timing issue
 
 Probes = namedtuple('Probes', ['x', 'y', 'z'])
 
@@ -28,12 +28,19 @@ class AlignemntHelper:
         self.tool = self.printer.lookup_object(f'tool {tool_id}', None)
         if self.tool is None:
             raise Exception(f'No tool with id {tool_id} found')
+        self.toollock = self.printer.lookup_object(f'toollock')
         self.probe_point = probe_point
         self.probes = probes
         self.gcode = self.printer.lookup_object('gcode')
         self.phoming = self.printer.lookup_object('homing')
         self.toolhead = self.printer.lookup_object('toolhead')
         self.reactor = self.printer.get_reactor()
+
+        # set default offsets
+        default_offsets = self.tool.get_offset()
+        self._default_x_offset = default_offsets[0]
+        self._default_y_offset = default_offsets[1]
+        self._default_z_offset = default_offsets[2]
 
         self.z_samples = []
         self.xy_samples = []
@@ -66,13 +73,15 @@ class AlignemntHelper:
 
     def prepare(self):
         self.gcode.respond_info(f'preparing alignment for tool {self.tool_id}')
+        self.toollock.saved_position = None # remove saved position
         self.gcode.run_script_from_command(
             'SAVE_GCODE_STATE NAME=alignment_state\n'
             'KTCC_TOOL_DROPOFF_ALL\n'
+            'SAVE_POSITION\n' # remove saved position
             'BED_MESH_CLEAR\n'
             'G90\n'
             'G28 Z\n'
-            f'SET_TOOL_OFFSET TOOL={self.tool_id} X={DEFAULT_X_OFFSET} Y={DEFAULT_Y_OFFSET} Z={DEFAULT_Z_OFFSET}\n'
+            f'SET_TOOL_OFFSET TOOL={self.tool_id} X={self._default_x_offset:.6f} Y={self._default_y_offset:.6f} Z={self._default_z_offset:.6f}\n'
             f'KTCC_T{self.tool_id}\n'
             f'G0 X{self.probe_point[0]} Y{self.probe_point[1]} F12000\n'
             'M400\n'
@@ -274,13 +283,13 @@ class Alignment:
             run_current[axis] = stepper.get_status()['run_current']
             if axis == 'z':
                 self.gcode.run_script_from_command(
-                    f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.6:.4f}\n'
-                    'G4 P200\n'
+                    f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.6:.2f}\n'
+                    'G4 P1000\n'
                 )
             else:
                 self.gcode.run_script_from_command(
-                    f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.5:.4f}\n'
-                    'G4 P200\n'
+                    f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.4:.2f}\n'
+                    'G4 P1000\n'
                 )
 
         yield
@@ -290,7 +299,7 @@ class Alignment:
             self.gcode.respond_info(f'restoring stepper current for axis {axis}')
             self.gcode.run_script_from_command(
                 f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis]}\n'
-                'G4 P200\n'
+                'G4 P1000\n'
             )
 
     cmd_KTCC_ALIGN_TOOLS_help = "aligns mutiple tools"

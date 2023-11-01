@@ -40,6 +40,7 @@ class Tool:
         self.zone = None                    # Position of the parking zone in the format X, Y
         self.park = None                    # Position to move to when fully parking the tool in the dock in the format X, Y
         self.offset = None                  # Offset of the nozzle in the format X, Y, Z
+        self.config_offset = None           # Offset of the nozzle in the format X, Y, Z. From config file.
 
         self.pickup_gcode = None            # The plain gcode string for pickup of the tool.
         self.dropoff_gcode = None           # The plain gcode string for droppoff of the tool.
@@ -163,6 +164,7 @@ class Tool:
             self.offset = config.get('offset', pp_status['offset'])
             if not isinstance(self.offset, list):
                 self.offset = str(self.offset).split(',')
+            self.config_offset = [e for e in self.offset]
 
             # Remove any accidental blank spaces.
             self.zone = [s.strip() for s in self.zone]

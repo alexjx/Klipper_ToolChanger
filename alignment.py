@@ -37,7 +37,7 @@ class AlignemntHelper:
         self.reactor = self.printer.get_reactor()
 
         # set default offsets
-        default_offsets = self.tool.get_offset()
+        default_offsets = [float(e) for e in self.tool.config_offset]
         self._default_x_offset = default_offsets[0]
         self._default_y_offset = default_offsets[1]
         self._default_z_offset = default_offsets[2]
@@ -72,7 +72,7 @@ class AlignemntHelper:
         return [p + o for p, o in zip(user_pos, self.tool.offset)]
 
     def prepare(self):
-        self.gcode.respond_info(f'preparing alignment for tool {self.tool_id}')
+        self.gcode.respond_info(f'preparing alignment for tool {self.tool_id}: X={self._default_x_offset:.6f} Y={self._default_y_offset:.6f} Z={self._default_z_offset:.6f}')
         self.toollock.saved_position = None # remove saved position
         self.gcode.run_script_from_command(
             'SAVE_GCODE_STATE NAME=alignment_state\n'
@@ -288,7 +288,7 @@ class Alignment:
                 )
             else:
                 self.gcode.run_script_from_command(
-                    f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.4:.2f}\n'
+                    f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.5:.2f}\n'
                     'G4 P600\n'
                 )
 
@@ -373,6 +373,8 @@ class Alignment:
                     if save_it:
                         self.gcode.run_script_from_command(f'KTCC_SAVE_TOOL_OFFSET TOOL={tool_id}')
                     break
+                else:
+                    self.gcode.respond_info(f'tool {tool_id}: alignment failed, retrying')
             else:
                 self.gcode.error(f'tool {tool_id}: alignment failed')
 

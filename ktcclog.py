@@ -99,7 +99,7 @@ class KtccLog:
 
         # Register commands
         handlers = [
-            'KTCC_LOG_TRACE', 'KTCC_LOG_DEBUG', 'KTCC_LOG_INFO', 'KTCC_LOG_ALWAYS', 
+            'KTCC_LOG_TRACE', 'KTCC_LOG_DEBUG', 'KTCC_LOG_INFO', 'KTCC_LOG_ALWAYS',
             'KTCC_SET_LOG_LEVEL', 'KTCC_DUMP_STATS', 'KTCC_RESET_STATS',
             'KTCC_INIT_PRINT_STATS', 'KTCC_DUMP_PRINT_STATS']
         for cmd in handlers:
@@ -112,7 +112,7 @@ class KtccLog:
 
         # Wraping G28 and wait for temperature so we don't try sending gcode commands to save state while the gcode is blocked.
         # Need to do it outermost so that any G28 macros are used too.
-        # When inside a G28 the parser won't run any SAVE_VARIABLE resulting in Klipper 
+        # When inside a G28 the parser won't run any SAVE_VARIABLE resulting in Klipper
         try:
             self.toolhead = self.printer.lookup_object('toolhead')
 
@@ -317,7 +317,7 @@ class KtccLog:
     def track_mount_start(self, tool_id):
         self.trace("track_mount_start: Running for Tool: %s." % (tool_id))
         self._set_tool_statistics(tool_id, 'tracked_mount_start_time', time.time())
-        
+
 
     def track_mount_end(self, tool_id):
         self.trace("track_mount_end: Running for Tool: %s." % (tool_id))
@@ -431,7 +431,7 @@ class KtccLog:
         try:
             return dividend/divisor
         except ZeroDivisionError:
-            return 0
+            return 0.0
 
     def _dump_statistics(self, report=False):
         if self.log_statistics or report:
@@ -446,17 +446,32 @@ class KtccLog:
             for tid in res:
                 tool_id= str(tid)
                 msg += "Tool#%s:\n" % (tool_id)
-                msg += "Completed %d out of %d mounts in %s. Average of %s per toolmount.\n" % (self.tool_statistics[tool_id]['toolmounts_completed'], self.tool_statistics[tool_id]['toolmounts_started'], self._seconds_to_human_string(self.tool_statistics[tool_id]['total_time_spent_mounting']), self._seconds_to_human_string(self._division(self.tool_statistics[tool_id]['total_time_spent_mounting'], self.tool_statistics[tool_id]['toolmounts_completed'])))
-                msg += "Completed %d out of %d unmounts in %s. Average of %s per toolunmount.\n" % (self.tool_statistics[tool_id]['toolunmounts_completed'], self.tool_statistics[tool_id]['toolunmounts_started'], self._seconds_to_human_string(self.tool_statistics[tool_id]['total_time_spent_unmounting']), self._seconds_to_human_string(self._division(self.tool_statistics[tool_id]['total_time_spent_unmounting'], self.tool_statistics[tool_id]['toolunmounts_completed'])))
+                msg += "Completed %d out of %d mounts in %s. Average of %.1f per toolmount.\n" % (
+                    self.tool_statistics[tool_id]['toolmounts_completed'],
+                    self.tool_statistics[tool_id]['toolmounts_started'],
+                    self._seconds_to_human_string(self.tool_statistics[tool_id]['total_time_spent_mounting']),
+                    self._seconds_to_human_string(
+                        self._division(self.tool_statistics[tool_id]['total_time_spent_mounting'],
+                                       self.tool_statistics[tool_id]['toolmounts_completed'])
+                    )
+                )
+                msg += "Completed %d out of %d unmounts in %s. Average of %.1f per toolunmount.\n" % (
+                    self.tool_statistics[tool_id]['toolunmounts_completed'],
+                    self.tool_statistics[tool_id]['toolunmounts_started'],
+                    self._seconds_to_human_string(self.tool_statistics[tool_id]['total_time_spent_unmounting']),
+                    self._seconds_to_human_string(
+                        self._division(self.tool_statistics[tool_id]['total_time_spent_unmounting'],
+                                       self.tool_statistics[tool_id]['toolunmounts_completed'])
+                    )
+                )
                 msg += "%s spent selected." % self._seconds_to_human_string(self.tool_statistics[tool_id]['time_selected'])
                 tool = self.printer.lookup_object("tool " + str(tool_id))
                 if tool.is_virtual != True or tool.name==tool.physical_parent_id:
                     if tool.extruder is not None:
                         msg += " %s with active heater and %s with standby heater." % (self._seconds_to_human_string(self.tool_statistics[tool_id]['time_heater_active']), self._seconds_to_human_string(self.tool_statistics[tool_id]['time_heater_standby']))
                 msg += "\n------------\n"
-                
 
-        self.always(msg)
+            self.always(msg)
 
     def _dump_print_statistics(self, report=False):
         if self.log_statistics or report:
@@ -473,12 +488,37 @@ class KtccLog:
                 ts = self.tool_statistics[tool_id]
                 pts = self.print_tool_statistics[tool_id]
                 msg += "Tool#%s:\n" % (tool_id)
-                msg += "Completed %d out of %d mounts in %s. Average of %s per toolmount.\n" % ((ts['toolmounts_completed']-pts['toolmounts_completed']), (ts['toolmounts_started']-pts['toolmounts_started']), self._seconds_to_human_string(ts['total_time_spent_mounting']-pts['total_time_spent_mounting']), self._seconds_to_human_string(self._division((ts['total_time_spent_mounting']-pts['total_time_spent_mounting']), (ts['toolmounts_completed']-ts['toolmounts_completed']))))
-                msg += "Completed %d out of %d unmounts in %s. Average of %s per toolunmount.\n" % (ts['toolunmounts_completed']-pts['toolunmounts_completed'], ts['toolunmounts_started']-pts['toolunmounts_started'], self._seconds_to_human_string(ts['total_time_spent_unmounting']-pts['total_time_spent_unmounting']), self._seconds_to_human_string(self._division(ts['total_time_spent_unmounting']-pts['total_time_spent_unmounting'], ts['toolunmounts_completed']-pts['toolunmounts_completed'])))
-                msg += "%s spent selected. %s with active heater and %s with standby heater.\n" % (self._seconds_to_human_string(ts['time_selected']-pts['time_selected']), self._seconds_to_human_string(ts['time_heater_active']-pts['time_heater_active']), self._seconds_to_human_string(ts['time_heater_standby']-pts['time_heater_standby']))
+                msg += "Completed %d out of %d mounts in %s. Average of %.1f per toolmount.\n" % (
+                    (ts['toolmounts_completed']-pts['toolmounts_completed']),
+                    (ts['toolmounts_started']-pts['toolmounts_started']),
+                    self._seconds_to_human_string(
+                        ts['total_time_spent_mounting']-pts['total_time_spent_mounting']
+                    ),
+                    self._seconds_to_human_string(
+                        self._division(
+                            (ts['total_time_spent_mounting']-pts['total_time_spent_mounting']),
+                            (ts['toolmounts_completed']-pts['toolmounts_completed'])
+                        )
+                    )
+                )
+                msg += "Completed %d out of %d unmounts in %s. Average of %.1f per toolunmount.\n" % (
+                    ts['toolunmounts_completed']-pts['toolunmounts_completed'],
+                    ts['toolunmounts_started']-pts['toolunmounts_started'],
+                    self._seconds_to_human_string(ts['total_time_spent_unmounting']-pts['total_time_spent_unmounting']),
+                    self._seconds_to_human_string(
+                        self._division(
+                            ts['total_time_spent_unmounting']-pts['total_time_spent_unmounting'],
+                            ts['toolunmounts_completed']-pts['toolunmounts_completed']
+                        )
+                    )
+                )
+                msg += "%s spent selected. %s with active heater and %s with standby heater.\n" % (
+                        self._seconds_to_human_string(ts['time_selected']-pts['time_selected']),
+                        self._seconds_to_human_string(ts['time_heater_active']-pts['time_heater_active']),
+                        self._seconds_to_human_string(ts['time_heater_standby']-pts['time_heater_standby'])
+                )
                 msg += "------------\n"
-        self.always(msg)
-
+            self.always(msg)
 
 
     def _persist_swap_statistics(self):
@@ -642,7 +682,7 @@ class KtccLog:
     #     msg += " on gate %s" % self._selected_gate_string()
     #     msg += ". Toolhead position saved pending resume" if self.saved_toolhead_position else ""
     #     msg += "\nFilament position: %s" % self._state_to_human_string()
-        
+
     #     if config:
     #         msg += "\n\nConfiguration:\nFilament homes"
     #         if self._must_home_to_extruder():

@@ -283,12 +283,12 @@ class Alignment:
             run_current[axis] = stepper.get_status()['run_current']
             if axis == 'z':
                 self.gcode.run_script_from_command(
-                    f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.8:.2f}\n'
+                    f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.85:.2f}\n'
                     'G4 P600\n'
                 )
             else:
                 self.gcode.run_script_from_command(
-                    f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.8:.2f}\n'
+                    f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.85:.2f}\n'
                     'G4 P600\n'
                 )
 

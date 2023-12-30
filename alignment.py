@@ -17,7 +17,7 @@ FAST_MOVE_SPEED_Z = 10.0
 PROBE_BACKOFF = 0.5
 XY_PROBE_DEPTH = 1.0
 XY_PROBE_OFFSET = 10.0
-DWELL_TIME = 0.8 # this used to avoid klipper timing issue
+DWELL_TIME = 1.0 # this used to avoid klipper timing issue
 
 Probes = namedtuple('Probes', ['x', 'y', 'z'])
 
@@ -283,12 +283,12 @@ class Alignment:
             run_current[axis] = stepper.get_status()['run_current']
             if axis == 'z':
                 self.gcode.run_script_from_command(
-                    f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.6:.2f}\n'
+                    f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.8:.2f}\n'
                     'G4 P600\n'
                 )
             else:
                 self.gcode.run_script_from_command(
-                    f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.5:.2f}\n'
+                    f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.8:.2f}\n'
                     'G4 P600\n'
                 )
 

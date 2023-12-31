@@ -446,7 +446,7 @@ class KtccLog:
             for tid in res:
                 tool_id= str(tid)
                 msg += "Tool#%s:\n" % (tool_id)
-                msg += "Completed %d out of %d mounts in %s. Average of %.1f per toolmount.\n" % (
+                msg += "Completed %d out of %d mounts in %s. Average of %s per toolmount.\n" % (
                     self.tool_statistics[tool_id]['toolmounts_completed'],
                     self.tool_statistics[tool_id]['toolmounts_started'],
                     self._seconds_to_human_string(self.tool_statistics[tool_id]['total_time_spent_mounting']),
@@ -455,7 +455,7 @@ class KtccLog:
                                        self.tool_statistics[tool_id]['toolmounts_completed'])
                     )
                 )
-                msg += "Completed %d out of %d unmounts in %s. Average of %.1f per toolunmount.\n" % (
+                msg += "Completed %d out of %d unmounts in %s. Average of %s per toolunmount.\n" % (
                     self.tool_statistics[tool_id]['toolunmounts_completed'],
                     self.tool_statistics[tool_id]['toolunmounts_started'],
                     self._seconds_to_human_string(self.tool_statistics[tool_id]['total_time_spent_unmounting']),
@@ -488,7 +488,7 @@ class KtccLog:
                 ts = self.tool_statistics[tool_id]
                 pts = self.print_tool_statistics[tool_id]
                 msg += "Tool#%s:\n" % (tool_id)
-                msg += "Completed %d out of %d mounts in %s. Average of %.1f per toolmount.\n" % (
+                msg += "Completed %d out of %d mounts in %s. Average of %s per toolmount.\n" % (
                     (ts['toolmounts_completed']-pts['toolmounts_completed']),
                     (ts['toolmounts_started']-pts['toolmounts_started']),
                     self._seconds_to_human_string(
@@ -501,7 +501,7 @@ class KtccLog:
                         )
                     )
                 )
-                msg += "Completed %d out of %d unmounts in %s. Average of %.1f per toolunmount.\n" % (
+                msg += "Completed %d out of %d unmounts in %s. Average of %s per toolunmount.\n" % (
                     ts['toolunmounts_completed']-pts['toolunmounts_completed'],
                     ts['toolunmounts_started']-pts['toolunmounts_started'],
                     self._seconds_to_human_string(ts['total_time_spent_unmounting']-pts['total_time_spent_unmounting']),

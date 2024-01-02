@@ -772,6 +772,7 @@ class ToolLock:
         self.log.trace("cmd_RESTORE_POSITION running: " + str(self.restore_position_on_toolchange_type))
 
         param = gcmd.get_int('RESTORE_POSITION_TYPE', None, minval=0, maxval=2)
+        feedrate = gcmd.get_int('F', None, minval=0)
 
         if param is not None:
             if param == 0 or param == 1 or param == 2:
@@ -785,13 +786,18 @@ class ToolLock:
 
         try:
             p = self.saved_position
-            if self.restore_position_on_toolchange_type == 1:
-                v=str("G1 X%.3f Y%.3f" % (p[0], p[1]))
-            elif self.restore_position_on_toolchange_type == 2:
-                v=str("G1 X%.3f Y%.3f Z%.3f" % (p[0], p[1], p[2]))
-            # Restore position
-            self.log.trace("cmd_RESTORE_POSITION running: " + v)
-            self.gcode.run_script_from_command(v)
+            if feedrate:
+                self.gcode.run_script_from_comamnd(
+                    'G0 F%d' % feedrate
+                )
+            if self.restore_position_on_toolchange_type >= 1:
+                self.gcode.run_script_from_command(
+                    'G0 X%.3f Y%.3f' % (p[0], p[1])
+                )
+            if self.restore_position_on_toolchange_type >= 2:
+                self.gcode.run_script_from_command(
+                    'G0 Z%.3f' % (p[2])
+                )
         except:
             raise gcmd.error("Could not restore position.")
 

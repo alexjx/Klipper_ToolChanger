@@ -323,11 +323,11 @@ class Tool:
 
             # If the next tool is not another virtual tool on the same physical tool.
             if int(self.physical_parent_id) ==  self.TOOL_UNLOCKED or self.physical_parent_id != int(current_tool.get_status()["physical_parent_id"]):
-                self.log.info("Will Dropoff():%s" % str(current_tool_id))
+                self.log.debug("Will Dropoff():%s" % str(current_tool_id))
                 current_tool.Dropoff()
                 current_tool_id = self.TOOL_UNLOCKED
             else: # If it's another virtual tool on the same parent physical tool.
-                self.log.info("Dropoff: T" + str(current_tool_id) + "- Virtual - Running UnloadVirtual")
+                self.log.debug("Dropoff: T" + str(current_tool_id) + "- Virtual - Running UnloadVirtual")
                 current_tool.UnloadVirtual()
 
 

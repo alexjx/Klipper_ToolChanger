@@ -630,7 +630,10 @@ class ToolLock:
     cmd_SET_TOOL_OFFSET_help = "Set an individual tool offset"
     def cmd_SET_TOOL_OFFSET(self, gcmd):
         tool_id = self._get_tool_id_from_gcmd(gcmd)
-        if tool_id is None: return
+        if tool_id is None:
+            tool_id = int(self.tool_current)
+            if tool_id < 0:
+                return
 
         x_pos = gcmd.get_float('X', None)
         x_adjust = gcmd.get_float('X_ADJUST', None)
@@ -661,7 +664,9 @@ class ToolLock:
     def cmd_GET_TOOL_OFFSET(self, gcmd):
         tool_id = self._get_tool_id_from_gcmd(gcmd)
         if tool_id is None:
-            return
+            tool_id = int(self.tool_current)
+            if tool_id < 0:
+                return
         tool = self.printer.lookup_object("tool " + str(tool_id))
         offset = tool.get_offset()
         gcmd.respond_info(f"TOOL {tool_id}: OFFSET={offset[0]}, {offset[1]}, {offset[2]}")

@@ -221,7 +221,7 @@ class AlignemntHelper:
         return self.z_samples
 
 class Alignment:
-    TMC_STEPPERS = re.compile(r'tmc[0-9]+ stepper_[xyz]')
+    TMC_STEPPERS = re.compile(r'tmc[0-9]+ (stepper_[xyz](?:\d+)?)$')
 
     def __init__(self, config):
         self.config = config
@@ -231,9 +231,9 @@ class Alignment:
         # steppers
         self.steppers = {}
         for name, obj in self.printer.lookup_objects():
-            if self.TMC_STEPPERS.match(name):
-                axis = name[-1]
-                self.steppers[axis] = obj
+            match = self.TMC_STEPPERS.match(name)
+            if match:
+                self.steppers[match.group(1)] = obj
 
         # Create an "endstop" object to handle the probe pin
         ppins = self.printer.lookup_object('pins')
@@ -278,29 +278,29 @@ class Alignment:
     def lower_stepper_current(self):
         # lower stepper current
         run_current = {}
-        for axis, stepper in self.steppers.items():
-            self.gcode.respond_info(f'lowering stepper current for axis {axis}')
-            run_current[axis] = stepper.get_status()['run_current']
-            if axis == 'z':
+        try:
+            for stepper_name, stepper in self.steppers.items():
+                self.gcode.respond_info(
+                    f'lowering stepper current for {stepper_name}')
+                current = stepper.get_status()['run_current']
+                run_current[stepper_name] = current
                 self.gcode.run_script_from_command(
-                    f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.85:.2f}\n'
-                    'G4 P600\n'
-                )
-            else:
-                self.gcode.run_script_from_command(
-                    f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis] * 0.85:.2f}\n'
+                    f'SET_TMC_CURRENT STEPPER={stepper_name} '
+                    f'CURRENT={current * 0.85:.2f}\n'
                     'G4 P600\n'
                 )
 
-        yield
-
-        # restore stepper current
-        for axis, stepper in self.steppers.items():
-            self.gcode.respond_info(f'restoring stepper current for axis {axis}')
-            self.gcode.run_script_from_command(
-                f'SET_TMC_CURRENT STEPPER=stepper_{axis} CURRENT={run_current[axis]}\n'
-                'G4 P600\n'
-            )
+            yield
+        finally:
+            # Restore every stepper that was successfully lowered.
+            for stepper_name, current in run_current.items():
+                self.gcode.respond_info(
+                    f'restoring stepper current for {stepper_name}')
+                self.gcode.run_script_from_command(
+                    f'SET_TMC_CURRENT STEPPER={stepper_name} '
+                    f'CURRENT={current}\n'
+                    'G4 P600\n'
+                )
 
     cmd_KTCC_ALIGN_TOOLS_help = "aligns mutiple tools"
     def cmd_KTCC_ALIGN_TOOLS(self, gcmd):

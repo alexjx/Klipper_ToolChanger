@@ -288,7 +288,7 @@ class ToolLock:
             tool = self.printer.lookup_object('tool %d' % (tool_id,), None)
             if not tool:
                 raise gcmd.error('invalid tool specified')
-            gcmd.respond_info("TOOL %d: ADANVCE=%.5f SMOOTH_TIME=%.5f"
+            gcmd.respond_info("TOOL %d: ADVANCE=%.5f SMOOTH_TIME=%.5f"
                                 % (tool_id, tool.pressure_advance, tool.pressure_advance_smooth_time,))
             return
         # if no tool specified, show all tools
@@ -296,7 +296,7 @@ class ToolLock:
             tool = self.printer.lookup_object('tool %d' % (i,), None)
             if not tool:
                 continue
-            gcmd.respond_info("TOOL %d: ADANVCE=%.5f SMOOTH_TIME=%.5f"
+            gcmd.respond_info("TOOL %d: ADVANCE=%.5f SMOOTH_TIME=%.5f"
                                 % (i, tool.pressure_advance, tool.pressure_advance_smooth_time,))
 
     cmd_KTCC_SAVE_TOOL_PRESSURE_ADVANCE_help = 'Save the pressure advance of a tool'
@@ -480,7 +480,8 @@ class ToolLock:
         elif tool_id is None and heater_id is None:
             tool_id = self.tool_current
             if int(self.tool_current) >= 0:
-                heater_name = self.printer.lookup_object("tool " + self.tool_current).get_status()["extruder"]
+                heater_name = self.printer.lookup_object(
+                    "tool " + str(self.tool_current)).get_status()["extruder"]
             #wait for bed
             self._Temperature_wait_with_tolerance(curtime, "heater_bed", tolerance)
 
@@ -792,7 +793,7 @@ class ToolLock:
         try:
             p = self.saved_position
             if feedrate:
-                self.gcode.run_script_from_comamnd(
+                self.gcode.run_script_from_command(
                     'G0 F%d' % feedrate
                 )
             if self.restore_position_on_toolchange_type >= 1:

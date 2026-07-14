@@ -261,8 +261,11 @@ ktcc_statistics_tool<id>
 
 KTCC uses Klipper's standard Python logging pipeline through
 `ktcc/diagnostics.py`; the former separate `ktcclog` subsystem is intentionally
-absent. Virtual tools, physical parents, and runtime remapping are explicit
-non-goals and fail configuration when enabled.
+absent. The root `ktcclog.py` only consumes the old configuration section so a
+printer can switch revisions without editing configuration; it has no commands,
+threads, files, statistics, or service dependencies. Virtual tools, physical
+parents, and runtime remapping are explicit non-goals and fail configuration
+when enabled.
 
 ## Capability 7: measure toolchanger usage
 

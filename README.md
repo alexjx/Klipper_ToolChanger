@@ -254,8 +254,10 @@ only the configured defaults.
 ## Logging and tool-change statistics
 
 KTCC uses Klipper's standard Python logging pipeline and writes contextual
-events to normal `klippy.log`. The former `[ktcclog]` extension, separate log
-file/thread/rotation, and log-level commands were removed.
+events to normal `klippy.log`. The former `[ktcclog]` file/thread/rotation
+behavior and log-level commands were removed. A no-op `[ktcclog]` configuration
+adapter remains so the same printer configuration can boot when switching
+between old and refactored revisions; its options have no effect.
 
 Tool-change statistics remain available as an independent feature. They count
 physical mount/unmount attempts and completions, lock cycles, selected time,
@@ -263,7 +265,7 @@ and active/standby heater time. `KTCC_DUMP_STATS` reports lifetime totals and
 `KTCC_RESET_STATS SURE=YES` clears them. To report one print, call
 `KTCC_INIT_PRINT_STATS` from `PRINT_START` and `KTCC_DUMP_PRINT_STATS` from
 `PRINT_END`. Totals use the existing `ktcc_statistics_*` save-variable keys;
-no `[ktcclog]` section is required.
+no `[ktcclog]` section is required by the new runtime.
 
 The former repo macro that redirected `G10` to `M568` was also removed because
 it conflicts with Klipper's `G10`/`G11` firmware-retraction pair. Slicer
@@ -272,7 +274,7 @@ temperature snippets must use `M568` explicitly.
 External configuration migration checklist (this repository does not edit
 `~/klipper_config`):
 
-1. remove `[ktcclog]` and its log-level options; retain statistics calls if desired;
+1. optionally remove `[ktcclog]` and its inactive options; retain statistics calls if desired;
 2. replace tool-temperature forms such as `G10 P...` with `M568 P...`;
 3. use this repo's `M109.cfg`, or route an existing `M109 S...` macro to
    `KTCC_TOOL_M109 ... TEMP=...`; the old sequence that only changed

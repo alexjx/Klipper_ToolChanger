@@ -117,14 +117,19 @@ def test_stable_jinja_status_fields_are_exercised(fixture_root: Path):
     assert "printer.toollock.tool_current" in combined
 
 
-def test_custom_logging_surface_is_absent_but_statistics_are_independent():
-    assert not (ROOT / "ktcclog.py").exists()
+def test_ktcclog_is_configuration_only_and_statistics_are_independent():
+    compatibility_source = (ROOT / "ktcclog.py").read_text(
+        encoding="utf-8"
+    ).lower()
+    assert "def load_config" in compatibility_source
+    assert "register_command" not in compatibility_source
+    assert "register_event_handler" not in compatibility_source
+    assert "statisticsservice" not in compatibility_source
     runtime_source = "\n".join(
         path.read_text(encoding="utf-8")
         for path in ROOT.glob("*.py")
         if path.name != "ktcclog.py"
     ).lower()
-    assert "ktcclog" not in runtime_source
     assert not any(command.lower() in runtime_source for command in REMOVED_OBSERVABILITY_COMMANDS)
     assert all(command.lower() in runtime_source for command in STATISTICS_COMMANDS)
 
@@ -157,9 +162,11 @@ def test_g10_is_reserved_for_firmware_retraction_not_temperature_aliasing():
     assert re.search(r"^G10\s+P", slicer_source, flags=re.MULTILINE) is None
 
 
-def test_installer_deploys_both_entry_modules_and_ktcc_package():
+def test_installer_deploys_entry_modules_config_adapter_and_ktcc_package():
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
-    for module in ("alignment.py", "tool.py", "toolgroup.py", "toollock.py"):
+    for module in (
+        "alignment.py", "tool.py", "toolgroup.py", "toollock.py", "ktcclog.py"
+    ):
         assert module in source
     assert '"${SRCDIR}/ktcc"' in source
     assert 'klippy/extras/ktcc"' in source

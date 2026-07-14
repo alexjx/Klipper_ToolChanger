@@ -9,8 +9,10 @@ Klipper-specific effects in `ktcc/klipper/`. Existing config/save-variable
 shapes are decoded beside their owner (`config/`, `profiles/`, or
 `persistence/`); they are not a separate runtime layer.
 The root modules (`tool.py`, `toolgroup.py`, `toollock.py`, and `alignment.py`)
-are Klipper entry-point facades and should remain thin. Printer macros live in
-`klipper_macros/`; supported sample configurations live in `config/`. Tests are
+are Klipper entry-point facades and should remain thin. `ktcclog.py` is a
+configuration-only rollback adapter and must not regain runtime behavior.
+Printer macros live in `klipper_macros/`; supported sample configurations live
+in `config/`. Tests are
 split into `tests/unit/`, `tests/integration/`, and `tests/characterization/`,
 with reusable printer data under `tests/fixtures/`.
 

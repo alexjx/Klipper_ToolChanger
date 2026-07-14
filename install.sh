@@ -36,9 +36,7 @@ check_preconditions()
 link_extension()
 {
     echo "Linking ${EXTENSION_NAME} to Klippy extras..."
-    # Remove the retired custom logging extension from previous installations.
-    rm -f "${KLIPPER_PATH}/klippy/extras/ktcclog.py"
-    for module in alignment.py tool.py toolgroup.py toollock.py; do
+    for module in alignment.py tool.py toolgroup.py toollock.py ktcclog.py; do
         ln -sf "${SRCDIR}/${module}" "${KLIPPER_PATH}/klippy/extras/${module}"
     done
     package_target="${KLIPPER_PATH}/klippy/extras/ktcc"

@@ -1,281 +1,297 @@
-# Tools for klipper (KTCC - Klipper Tool Changer Code)
+# KTCC: physical toolchanger framework for Klipper
 
-## Changes
+KTCC is a Klipper extension for multi-head toolchangers. Each `[tool N]`
+represents one independent physical head with its own extruder, heater, fan,
+offset, firmware-retraction profile, pressure advance, thermal targets, and
+temperature-wait policy. Hardware-specific pickup, dropoff, lock, unlock, and
+recovery motion remains user-defined G-code.
 
-1. Automatic tool alignment
-2. Tool offset persist to "Saved Variable"
-3. Global offset persist to "Saved Variable"
-4. Retraction persist to "Saved Variable"
+This repository originated from Andrei Ignat's open-source Klipper ToolChanger
+project and retains its GPLv3 source-file licensing.
 
-## Introduction
+## Supported model
 
-This are python modules, macros and example config for the
-[Klipper 3D printer firmware](https://github.com/Klipper3d/klipper). 
-In short 
+- Any number of independently configured physical tools; the included
+  reference fixture and complex example use four.
+- `[toolgroup N]` as a shared configuration/action source. A group is not a
+  runtime parent and does not own changer state.
+- Existing `KTCC_Tn`, temperature, fan, offset, retraction, PA, position,
+  lock/unlock, and alignment command names.
+- Existing action templates using `myself` and `toollock`, plus a versioned
+  immutable action context for new integrations.
+- Existing `save_variables` keys, kept as the only persistent representation.
 
-At it's simplest you need for each extruder tool to specify extruder, fan, offset to first tool or probe.
-Then specify four macros: pickup, dropoff, toollock and toolunlock.
-It doesn't matter if you lock the tool by a servo, a stepper or moving in a special way as long as it can be written in GCODE.
+Virtual tools, `physical_parent`, and runtime remapping are intentionally not
+supported. Non-inert legacy declarations fail configuration loading instead of
+being silently ignored.
 
-You can hardcode one pickup and dropoff macro for each tool or only one that uses the parameters stored for each tool to for example aproach he ZONE fast, slower to PARKING place, or the PARKING coordinates could be where a robotic arm picks up the tool. You decide how to use it :D
+## Architecture
 
-This is working great for my printer and sharing this because there is nothing like it for Klipper.
+The root Klipper modules are thin facades. Code under `ktcc/` is organized by
+toolchanger feature instead of generic architectural layers:
 
-## Features
-
-* **Each Tool is treated as an object and has it's own configuration** -
-having configurable coordinates for parking, zoning, tool offset, 
-meltzonelength, extruder, fan, etc. You can use all or none.
-*  **Multiple tools can be grouped in ToolGroup.** -Most configuration can
-be inherited from the group if not specified in the tool config section.
-* **Tools don't need to be extruders/hotends**, can be anything.
-* **User defineable macro to Lock / Unlock** - Uses custom gcodes in config 
-like the gcode_button. This can call a macro or multiple lines. 
-* **User defineable macro to Pickup / Dropoff tools** - Can be inherited from group so one for many or you specify a macro or code for each.
-In the macro, `myself` refers to the calling toolobject so you can get 
-myself.id for tool number or myself.offset[0] for X offset in the macro.
-Ex. having same pickup gcode macro inherited for all tools from a group 
-except for one that uses another type of toolwipe and has it's own pickup_gcode.
-* **Fan speed** is carried over on toolchange if the tool has a fan. Also
-`M106`/`M107` defaults to current_tool to set fan speed but can also use a Pnnn 
-parameter to specify another tool.
-* **Extruder temperature control** - 
-  - Definable for any tool with a Pnnn parameter or defaults to current_tool
-  - Has diffrent Active and Standby temperatures.
-  - Can be set in Active, Standby or Off mode.
-  - Can have delayed Standby and Off. Configured and/or customized with N and O parameters at runtime.
-    - Example. Set Standby temperature 30 sec after putting the tool in standby and in Off after 30 minutes of not being activated.
-    - Or set Time to standby to 0.1 for instant standby and Time to Powerdown to 604800 for a having it powered for a week.
-    - Usefull when having sporadic toolchanges in a large print or many toolchanges in a small print.
-  - Wait to reach temperature with tolerance. Set temperature +/- configurable tolerance.
-* **Global ToolLock parameters** - example purge_on_toolchange can be set 
-to false when aligning tools with TAMV/ZTATP automation. 
-* Current Tool is saved and restored at powerdown. Default but optional.
-* Position prior to toolchange can optionaly be saved and restored so the tool returns from where it came.
-* Logging including to file functionality. You can keep the console log to a minimum and send debugging information to `ktcc.log` located in the same directory as Klipper logs.
-*  **Virtual tools** - A tool can be virtual and have a physical parent,
-inheriting all nonspecified configuration from parent, parent group and
-then toolgroup. Use case example of an ERCF on a PLA tool,a ERCF on a 
-PETG tool, one tool without virtual tools for abrasive and yet another
-tool with 3 markers that can switch between 3 markers by rotation.
-# Statistics are saved for total but also per print:
-```
-ToolChanger Statistics:
-KTCC Statistics:
-7 hours 52 minutes 36 seconds spent mounting tools
-6 hours 42 minutes 46 seconds spent unmounting tools
-30 tool locks completed
-37 tool unlocks completed
-462 tool mounts completed
-461 tool dropoffs completed
-------------
-Tool#0:
-Completed 220 out of 221 mounts in 3 hours 43 minutes 21 seconds. Average of 1 minutes 0 seconds per toolmount.
-Completed 219 out of 220 unmounts in 3 hours 12 minutes 33 seconds. Average of 52 seconds per toolunmount.
-1 hours 4 minutes 16 seconds spent selected. 23 hours 7 minutes 14 seconds with active heater and 49 minutes 44 seconds with standby heater.
-------------
-Tool#1:
-Completed 124 out of 124 mounts in 2 hours 5 minutes 7 seconds. Average of 1 minutes 0 seconds per toolmount.
-Completed 124 out of 125 unmounts in 1 hours 49 minutes 5 seconds. Average of 52 seconds per toolunmount.
-10 hours 44 minutes 21 seconds spent selected. 0 seconds with active heater and 0 seconds with standby heater.
-------------
-Tool#49:
-Completed 8 out of 8 mounts in 1 minutes 7 seconds. Average of 8 seconds per toolmount.
-Completed 8 out of 8 unmounts in 42 seconds. Average of 5 seconds per toolunmount.
-4 minutes 51 seconds spent selected. 0 seconds with active heater and 0 seconds with standby heater.
-------------
+```text
+ktcc/
+├── tools.py             physical tool definitions and registry
+├── profiles/            per-tool parameters and profile application
+├── toolchange/          transaction state, recovery, and execution
+├── thermal.py           heater ownership, preheat, and waiting
+├── persistence/         state repository and current-key codec
+├── ports.py             typed machine integration contracts
+├── klipper/             Klipper implementations and composition
+└── config/              typed config resolution and old-field normalization
 ```
 
-## Installation Instructions
-### Install with Moonraker Autoupdate Support
-This plugin assumes that you installed Klipper into your home directory (usually `/home/pi`). 
+Compatibility is an external behavior, not a parallel runtime layer. The
+existing root facades keep the same command/status/Jinja look and feel while
+delegating to the same registry and services used by new functionality. The
+existing save-variable and config shapes are read directly by their owning
+features.
 
-1) Clone this repo into your home directory where Klipper is installed:
-```
-cd ~
-git clone https://github.com/TypQxQ/Klipper_ToolChanger.git
+There is one authoritative `ToolChangeService`, one profile service, and one
+thermal controller per physical heater. Machine actions, persistence, timers,
+logging, and shutdown are injected ports, so the core is testable without
+printer hardware.
+
+See [`docs/architecture.md`](docs/architecture.md) for the functional
+capabilities, their observable contracts, the code that owns them, runtime
+state flow, and extension points.
+
+## Installation
+
+The installer links the four Klipper entry modules and the `ktcc` package into
+`klippy/extras`, then restarts Klipper:
+
+```bash
+git clone https://github.com/alexjx/Klipper_ToolChanger.git \
+  ~/Klipper_ToolChanger
+~/Klipper_ToolChanger/install.sh
 ```
 
-2) Edit `moonraker.conf` by adding the following entry:
+Use `-k` when Klipper is not at `~/klipper`:
+
+```bash
+~/Klipper_ToolChanger/install.sh -k /path/to/klipper
 ```
+
+For Moonraker update management:
+
+```ini
 [update_manager client klipper_toolchanger]
 type: git_repo
 path: ~/Klipper_ToolChanger
-origin: https://github.com/TypQxQ/Klipper_ToolChanger.git
+origin: https://github.com/alexjx/Klipper_ToolChanger.git
 install_script: install.sh
 is_system_service: False
 ```
 
-3) Run the `install.sh` script
+For a manual installation, copy/link `alignment.py`, `tool.py`, `toolgroup.py`,
+`toollock.py`, and the complete `ktcc/` directory into `klippy/extras`. Copying
+only the root Python files is insufficient.
+
+## Configuration
+
+Start with:
+
+- [`config/example_simple`](config/example_simple) for two physical tools;
+- [`config/example_complex`](config/example_complex) for four independent
+  physical tools;
+- [`config/readme.md`](config/readme.md) for every supported field.
+
+Minimal shape:
+
+```ini
+[save_variables]
+filename: ~/variables.cfg
+
+[toollock]
+tool_lock_gcode:
+  # Hardware-specific lock action
+tool_unlock_gcode:
+  # Hardware-specific unlock action
+
+[toolgroup 0]
+pickup_gcode:
+  SUB_TOOL_PICKUP T={myself.name}
+dropoff_gcode:
+  SUB_TOOL_DROPOFF T={myself.name}
+
+[tool 0]
+tool_group: 0
+extruder: extruder
+fan: partfan_t0
+zone: 550,5,0
+park: 598,5,0
+offset: 0,0,0
+retract_length: 0.8
+retract_speed: 35
+unretract_extra_length: 0
+unretract_speed: 35
+pressure_advance: 0.025
+pressure_advance_smooth_time: 0.04
+heater_active_temp: 220
+heater_standby_temp: 170
 ```
-~/Klipper_ToolChanger/install.sh
+
+`init_printer_to_last_tool` is still accepted for configuration compatibility,
+but startup never performs automatic lock/unlock motion. Persisted state is an
+estimate; interrupted or malformed state enters recovery conservatively.
+
+## Per-tool profile lifecycle
+
+Each tool resolves an immutable effective profile in this order:
+
+1. configured defaults from `[toolgroup]` and `[tool]`;
+2. persisted retraction, PA, and local offset overrides;
+3. non-persistent job/session overrides.
+
+Retraction and PA are applied when their tool becomes active. Editing the
+mounted tool repairs the relevant hardware component immediately; editing an
+unmounted tool stores its desired value without changing another extruder.
+Optional input-shaper values are applied as part of the same activation.
+
+Useful commands:
+
+- `KTCC_SET_TOOL_RETRACTION TOOL=<id> LENGTH=<mm> SPEED=<mm/s>
+  EXTRA=<mm> PRIME_SPEED=<mm/s> [ZHOP=<mm>]` — update and persist that tool's
+  firmware-retraction profile.
+- `KTCC_GET_TOOL_RETRACTION [TOOL=<id>]`.
+- `KTCC_SET_TOOL_PRESSURE_ADVANCE [TOOL=<id>|EXTRUDER=<name>]
+  ADVANCE=<value> [SMOOTH_TIME=<seconds>]` — session update.
+- `KTCC_SAVE_TOOL_PRESSURE_ADVANCE TOOL=<id>` — promote current PA to the
+  persisted layer.
+- `KTCC_APPLY_TOOL_PROFILE [TOOL=<mounted id>]` — reapply retraction, PA,
+  optional motion profile, and offset to the mounted tool.
+- `SET_TOOL_OFFSET ...` creates a session offset;
+  `KTCC_SAVE_TOOL_OFFSET TOOL=<id>` persists it.
+
+## Thermal, preheat, and waiting
+
+Every physical heater has one controller and explicit owner. Session active and
+standby targets remain independent for every tool and are never persisted.
+Parked tools follow `ACTIVE -> STANDBY -> OFF` using generation-safe timers.
+
+Compatibility commands remain available:
+
+- `SET_TOOL_TEMPERATURE TOOL=<id> [ACTV_TMP=<C>] [STDB_TMP=<C>]
+  [CHNG_STATE=0|1|2] [STDB_TIMEOUT=<s>] [SHTDWN_TIMEOUT=<s>]`;
+- `TEMPERATURE_WAIT_WITH_TOLERANCE [TOOL=<id>|HEATER=<id>]
+  [TOLERANCE=<C>]`;
+- the repo `M104`, `M109`, `M116`, and `M568` macros.
+
+`M109 Tn Sx` atomically sets the active target and performs a heat-only wait
+against a frozen target. `M109 S0` turns the heater off and does not wait.
+`G10` is deliberately left to Klipper firmware retraction; use `M568` for the
+older RepRap-style tool-temperature operation.
+
+Explicit framework commands:
+
+- `KTCC_PREHEAT_TOOL TOOL=<id> MODE=ACTIVE|STANDBY [TEMP=<C>]
+  [WAIT=0|1] [TOLERANCE=<C>] [TIMEOUT=<s>]`;
+- `KTCC_CANCEL_PREHEAT TOOL=<id>`;
+- `KTCC_WAIT_TOOL TOOL=<id> TARGET=CURRENT|ACTIVE|STANDBY
+  MODE=HEAT|RANGE|STABLE [TOLERANCE=<C>] [TIMEOUT=<s>]
+  [STABLE_TIME=<s>]`.
+
+`HEAT` never waits for cooling after overshoot, `RANGE` accepts one observation
+inside the tolerance, and `STABLE` requires a continuous in-range duration. A
+target changed by another actor aborts a frozen-target wait.
+
+## Tool-change transaction and recovery
+
+`KTCC_Tn` and `KTCC_TOOL_DROPOFF_ALL` execute durable transactions:
+
+1. validate state and homing;
+2. automatically issue `G11` if the known source is firmware-retracted;
+3. preheat the target;
+4. persist `CHANGING` before the first opaque mechanical action;
+5. drop, activate/apply the target profile, pick up, verify when configured,
+   apply offset, and commit;
+6. write `tool_current=-2` before mechanical risk, then write the final tool ID
+   (or `-1`) after commit. No new persistent state schema is introduced.
+
+An error after mechanical risk turns all tool heaters off, writes the existing
+`tool_current=-2` recovery sentinel, and requests Klipper shutdown. A restart
+with `tool_current=-2` also enters recovery. Normal KTCC commands are blocked
+until recovery completes. Detailed transaction phases and checkpoints are
+runtime-only because the persistent model is intentionally unchanged.
+
+Recovery commands:
+
+- `KTCC_RECOVERY_STATUS` — failure/action/checkpoint/estimate data and the
+  required acknowledgment token;
+- `KTCC_RECOVERY_ABORT FAILURE_ID=<id> [HEATERS=OFF]` — no reverse motion;
+- `KTCC_RECOVERY_RUN FAILURE_ID=<id> ACTION=<configured action id>`;
+- `KTCC_RECOVERY_RECONCILE FAILURE_ID=<id> MOUNTED=NONE|UNKNOWN|T<id>
+  LOCK=LOCKED|UNLOCKED|UNKNOWN CARRIAGE=<estimate> ACK=<token> [NOTE=<text>]`;
+- `KTCC_RECOVERY_CONFIRM FAILURE_ID=<id>` — verify/reapply and return to idle.
+
+Action macros may durably report sub-steps with:
+
+```text
+KTCC_TRANSITION_CHECKPOINT
+  TRANSITION_ID={transition.id}
+  CAPABILITY={transition.checkpoint_capability}
+  NAME=<checkpoint>
+  COMPLETED=0|1
 ```
 
-Klipper_ToolChanger will show up in the update the next time you restart moonraker, or you can restart mooraker right away with: `sudo systemctl restart moonraker`.
-If you encouter errors after an automatic Klipper update you can safetly run the `install.sh` scipt again to repair the links to the extension.
+The capability exists only in the active action context; console commands
+cannot forge a checkpoint.
 
-### Manual Install
-Copy the python (`*.py`) files into the `\klipper\klipper\extras` directory. Assuming Klipper is installed in your home directory:
+## Action template context
+
+Existing templates retain:
+
+- `myself` — the legacy tool status mapping (`name`, `zone`, `park`, `offset`,
+  thermal/profile fields, and so on);
+- `toollock` — current compatibility status.
+
+New templates also receive immutable `tool`, `thermal`, `changer`, and
+`transition` mappings. `tool.profile` is the effective per-tool profile, not
+only the configured defaults.
+
+## Logging and tool-change statistics
+
+KTCC uses Klipper's standard Python logging pipeline and writes contextual
+events to normal `klippy.log`. The former `[ktcclog]` extension, separate log
+file/thread/rotation, and log-level commands were removed.
+
+Tool-change statistics remain available as an independent feature. They count
+physical mount/unmount attempts and completions, lock cycles, selected time,
+and active/standby heater time. `KTCC_DUMP_STATS` reports lifetime totals and
+`KTCC_RESET_STATS SURE=YES` clears them. To report one print, call
+`KTCC_INIT_PRINT_STATS` from `PRINT_START` and `KTCC_DUMP_PRINT_STATS` from
+`PRINT_END`. Totals use the existing `ktcc_statistics_*` save-variable keys;
+no `[ktcclog]` section is required.
+
+The former repo macro that redirected `G10` to `M568` was also removed because
+it conflicts with Klipper's `G10`/`G11` firmware-retraction pair. Slicer
+temperature snippets must use `M568` explicitly.
+
+External configuration migration checklist (this repository does not edit
+`~/klipper_config`):
+
+1. remove `[ktcclog]` and its log-level options; retain statistics calls if desired;
+2. replace tool-temperature forms such as `G10 P...` with `M568 P...`;
+3. use this repo's `M109.cfg`, or route an existing `M109 S...` macro to
+   `KTCC_TOOL_M109 ... TEMP=...`; the old sequence that only changed
+   `ACTV_TMP` and then called a tolerance wait did not activate an OFF heater.
+
+## Development and verification
+
+The repository uses `uv` and tests without printer hardware:
+
+```bash
+uv sync --locked
+uv run pytest -q
+uv run python -m py_compile tool.py toolgroup.py toollock.py alignment.py
+bash -n install.sh
+git diff --check
 ```
-cp ./*.py ~/klipper/klippy/extras/
-```
-Then restart Klipper to pick up the extensions.
 
-## To do:
-* Add selectable automatic calculation of active times based on previous times. Ex:
-  * Mean Layer time Standby mode. - Save time at every layerchange and at toolchange set to mean time of last 3 layers *2 or at last layer *1.5 with a Maximum and a minimum time. Needs to be analyzed further.
-  * Save the time it was in Standby last time and apply a fuzzfactor. Put tool in standby and heatup with presumption that next time will be aproximatley after the same time as last. +/- Fuzzfactor.
-
-## Configuration requirements
-* `[input_shaper]` needs to be used for input shaper to wordk.
-
-## G-Code commands:
-* `TOOL_LOCK` - Lock command
-* `TOOL_UNLOCK` - Unlock command
-* `KTCC_Tn` - T0, T1, T2, etc... A select command is created for each tool. 
-  * `R` - Calls SAVE_CURRENT_POSITION with the variable as a RESTORE_POSITION_TYPE. For example "T0 R1" will call "SAVE_CURRENT_POSITION RESTORE_POSITION_TYPE=1" before moving. Positioned is restored with "RESTORE_POSITION" from below.
-* `KTCC_TOOL_DROPOFF_ALL` - Dropoff the current tool without picking up another tool
-* `SET_AND_SAVE_FAN_SPEED` - Set the fan speed of specified tool or current tool if no `P` is supplied. Then save to be recovered at ToolChange.
-  * `S` - Fan speed 0-255 or 0-1, default is 1, full speed.
-  * `P` - Fan of this tool. Default current tool.
-* `TEMPERATURE_WAIT_WITH_TOLERANCE` - Waits for all temperatures, or a specified tool or heater's temperature.
-This command can be used without any additional parameters. Without parameters it waits for bed and current extruder. Only one of either TOOL or HEATER may be used.
-  - `TOOL` - Tool number.
-  - `HEATER` - Heater number. 0="heater_bed", 1="extruder", 2="extruder1", 3="extruder2", etc. Only works if named as default, this way.
-  - `TOLERANCE` - Tolerance in degC. Defaults to 1*C. Wait will wait until heater is between set temperature +/- tolerance.
-* `SET_TOOL_TEMPERATURE` - Set tool temperature.
-  * `TOOL` - Tool number, optional. If this parameter is not provided, the current tool is used.
-  * `STDB_TMP` - Standby temperature(s), optional
-  * `ACTV_TMP` - Active temperature(s), optional
-  * `CHNG_STATE` - Change Heater State, optional: 0 = off, 1 = standby temperature(s), 2 = active temperature(s).
-  * `STDB_TIMEOUT` - Time in seconds to wait between changing heater state to standby and setting heater target temperature to standby temperature when standby temperature is lower than tool temperature.
-    * Use for example 0.1 to change immediately to standby temperature.
-  * `SHTDWN_TIMEOUT` - Time in seconds to wait from docking tool to shutting off the heater, optional.
-    * Use for example 86400 to wait 24h if you want to disable shutdown timer.
-* `SET_GLOBAL_OFFSET` - Set a global offset that can be applied to all tools
-  * `X` / `Y` / `Z` - Set the X/Y/Z offset position
-  * `X_ADJUST` / `Y_ADJUST` / `Z_ADJUST` - Adjust the X/Y/Z offset position incramentally
-* `SET_TOOL_OFFSET` - Set the offset of an individual tool
-  * `TOOL` - Tool number, optional. If this parameter is not provided, the current tool is used.
-  * `X` / `Y` / `Z` - Set the X/Y/Z offset position
-  * `X_ADJUST` /`Y_ADJUST` / `Z_ADJUST` - Adjust the X/Y/Z offset position incramentally  
-* `SET_PURGE_ON_TOOLCHANGE` - Sets a global variable that can disable all purging (can be used in macros) when loading/unloading. For example when doing a TAMV/ZTATP tool alignement.
-* `SAVE_POSITION` - Sets the Restore type and saves specified position for the toolhead. This command is usually used inside the custom g-code of the slicer software. The restore_position_on_toolchange_type will be changed to reflect the passed parameters.
-  * X= X position to save, optional but Y must be specifie or this will be ignored.
-  * Y= Y position to save, optional but X must be specifie or this will be ignored.
-  * Z= Z position to save, optional but X and Y must be specifie or this will be ignored.
-    * With no parameters it will set Restore type to 0, no restore.
-    * With X and Y parameters it will save the specified X and Y. Sets restore type to 1, restore XY.
-    * With X, Y and Z parameters it will save the specified X, Y and Z. Sets restore type to 2, restore XYZ.
-* `SAVE_CURRENT_POSITION` - Save the current G-Code position of the toolhead. This command is usually used inside the pickup_gcode script or the custom g-code of the slicer software.
-  * RESTORE_POSITION_TYPE= Type of restore, optional. If not specified, restore_position_on_toolchange_type will not be changed.
-    * 0: No restore
-    * 1: Restore XY
-    * 2: Restore XYZ
-* `RESTORE_POSITION` - Restore position to the latest saved position. This command is usually used inside the pickup_gcode script.
-  * RESTORE_POSITION_TYPE= Type of restore, optional. If not specified, restore_position_on_toolchange_type will be used.
-    * 0: No restore
-    * 1: Restore XY
-    * 2: Restore XYZ
-* `KTCC_SET_GCODE_OFFSET_FOR_CURRENT_TOOL` - 
-* `KTCC_LOG_TRACE` - Send a message to log at this logging level.
-  * MSG= The message to be sent.
-* `KTCC_LOG_DEBUG` - As above for this level.
-* `KTCC_LOG_INFO` - As above for this level.
-* `KTCC_LOG_ALWAYS` - As above for this level.
-* `KTCC_SET_LOG_LEVEL` - Set the log level for the KTCC
-  * LEVEL= Level of logging to print on screen
-    * 0: Only the Always messages
-    * 1: Info messages and above
-    * 2: Debug messages and above
-    * 3: Trace messages and above
-  * LOGFILE= Level of logging to save to file, KTCC.log in same directory as other logs.
-* `KTCC_DUMP_STATS` - Dump the KTCC statistics
-* `KTCC_RESET_STATS` - Resets all saved statistics, you may regret this.
-* `KTCC_INIT_PRINT_STATS` - Run at start of a print to reset the KTCC print statistics.
-* `KTCC_DUMP_PRINT_STATS` - Run at end of a print to list statistics since last print reset.
-* `KTCC_DISPLAY_TOOL_MAP` - Display the current mapping of tools to other KTCC tools.
-* `KTCC_REMAP_TOOL` - The command to remap a tool or reset the remaping. 'KTCC_REMAP_TOOL TOOL=0 SET=5' will remap KTCC_T0 to KTCC_T5. State is saved and reloaded after restart.
-  * RESET= 1
-    * 0: Default, do not reset.
-    * 1: Reset all remaps.
-  * TOOL= The toolnumber you want to remap
-  * SET= The toolnumber you want to remap to.
-
-## Values accesible from Macro for each object
-- **Toollock**
-  - `global_offset` - Global offset.
-  - `tool_current` - -2: Unknown tool locked, -1: No tool locked, 0: and up are toolnames.
-  - `saved_fan_speed` - Speed saved at each fanspeedchange to be recovered at Toolchange.
-  - `purge_on_toolchange` - For use in macros to enable/disable purge/wipe code globaly.
-  - `restore_position_on_toolchange_type` - The type of restore position:
-    - 0: No restore
-    - 1: Restore XY
-    - 2: Restore XYZ
-  - `saved_position` - The position saved when the latest T# command had a RESTORE_POSITION parameter to other than 0
-- **Tool** - The tool calling this macro is referenced as `myself` in macros. When running for example `T3` to pickup the physical tool, in `pickup_gcode:` of one can write `{myself.name}` which would return `3`.
-  - `name` - id. 0, 1, 2, etc.
-  - `is_virtual` - If this tool has another layer of toolchange possible.
-  - `physical_parent_id` - Parent physical tool that holds tool coordinates. Can be same as this.
-  - `extruder` - extruder name as configured.
-  - `fan` - fan name.
-  - `lazy_home_when_parking` - When set to 1, will home unhomed XY axes if needed and will not move any axis if already homed and parked. 2 Will also home Z if not homed.
-  - `meltzonelength` - Meltzonelength to unload/load filament at toolpak. See e3d documentation.
-  - `zone` - Fast aproach coordinates when parking
-  - `park` - Parking spot, slow aproach.
-  - `offset` - Tool offset.
-  - `heater_state` - 0 = off, 1 = standby temperature, 2 = active temperature. Placeholder.
-  - `heater_active_temp` - Temperature to set when in active mode.
-  - `heater_standby_temp` - Temperature to set when in standby mode.
-  - `idle_to_standby_time` - Time in seconds from being parked to setting temperature to standby the temperature above. Use 0.1 to change imediatley to standby temperature.
-  - `idle_to_powerdown_time` - Time in seconds from being parked to setting temperature to 0. Use something like 86400 to wait 24h if you want to disable. Requred on Physical tool.
-- **ToolGroup**
-  - `is_virtual` - As above
-  - `physical_parent_id` - As above
-  - `lazy_home_when_parking` - As above
-
-## Example configuration
-My full and updated configuration file backup can be found here:
-https://github.com/TypQxQ/DuetBackup/tree/main/qTC-Klipper
-
-## Updates 09/03/2023
-Added Tool Remap. Point one or more tools to another one. Including fan and temperature. This is persistent at reboot.
-* `KTCC_DISPLAY_TOOL_MAP` - Display the current mapping of tools to other KTCC tools.
-* `KTCC_REMAP_TOOL` - The command to remap a tool or reset the remaping.
-* `KTCC_CHECK_TOOL_REMAP` - Display all tool remaps.
-
-
-## Updates 08/03/2023
-Added per print statistics and a wrapper around G28 to disable saving statistics while homing.
-The latter led to MCU Timer to close error when loading a tool at homing.
-* `KTCC_INIT_PRINT_STATS` - Run at start of a print to reset the KTCC print statistics.
-* `KTCC_DUMP_PRINT_STATS` - Run at end of a print to list statistics since last print reset.
-
-## Updates 22/02/2023
-This is not a simple upgrade, it has some configuration updates.
-A namechange to KTCC (Klipper Tool Changer Code) is also in the works).
-
-- **News:**
-  - Virtual Tools
-  - Logfile
-  - Statistics
-
-- **Changes to Configuration:**
-  - LogLevel under ToolLock is deprecated.
-  - Must include new section ```[ktcclog]``` before all other Toollock, tool, and the others..
-  - New ```virtual_toolload_gcode:`` parameter to tools.
-  - New ```virtual_toolunload_gcode:`` parameter to tools.
-
-- **Changes to commands:**
-  - T_1 => KTCC_TOOL_DROPOFF_ALL
-  - T# => KTCC_T# (ex. T0 => KTCC_T0)
-
-- **New  commands:**
-  - KTCC_SET_GCODE_OFFSET_FOR_CURRENT_TOOL
-  - KTCC_LOG_TRACE
-  - KTCC_LOG_DEBUG
-  - KTCC_LOG_INFO
-  - KTCC_LOG_ALWAYS
-  - KTCC_SET_LOG_LEVEL
-  - KTCC_DUMP_STATS
-  - KTCC_RESET_STATS
+The local unit suite covers model invariants, persistence, four-tool profile
+isolation, thermal timers/waits, transaction failure boundaries, recovery,
+Klipper integration, facade composition, removed features, and alignment
+cleanup. Real pickup/dropoff motion and probing still require careful
+validation on the target machine.

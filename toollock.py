@@ -1,952 +1,799 @@
-# KTCC - Klipper Tool Changer Code
-# Toollock and general Tool support
-#
-# Copyright (C) 2023  Andrei Ignat <andrei@ignat.se>
-#
-# This file may be distributed under the terms of the GNU GPLv3 license.
-#
+# Copyright (C) 2023 Andrei Ignat <andrei@ignat.se>
+# SPDX-License-Identifier: GPL-3.0-only
 
-# To try to keep terms apart:
-# Mount: Tool is selected and loaded for use, be it a physical or a virtual on physical.
-# Unmopunt: Tool is unselected and unloaded, be it a physical or a virtual on physical.
-# Pickup: Tool is physically picked up and attached to the toolchanger head.
-# Droppoff: Tool is physically parked and dropped of the toolchanger head.
-# ToolLock: Toollock is engaged.
-# ToolUnLock: Toollock is disengaged.
+"""Klipper G-code facade and composition root for KTCC.
+
+This module parses legacy command parameters and exposes stable status fields.
+Changer state, profiles, thermal policy, persistence, and transactions live in
+the ``ktcc`` application services; no second implementation is kept here.
+"""
+
+import logging
+
+from ktcc.klipper.composition import compose_runtime
+from ktcc.statistics.reporting import format_print_statistics, format_statistics
+from ktcc.thermal import WaitTarget
+from ktcc.toolchange.state import ChangerMode, LockState, MountedKind, MountedState
+from ktcc.tools import Vector3
+from ktcc.profiles.models import (
+    FirmwareRetractionProfile,
+    PressureAdvanceProfile,
+    WaitMode,
+)
+from ktcc.toolchange.recovery import CarriageEstimate
+from ktcc.ports import ThermalMode
+
 
 class ToolLock:
     TOOL_UNKNOWN = -2
     TOOL_UNLOCKED = -1
-    BOOT_DELAY = 1.5            # Delay before running bootup tasks
-    VARS_KTCC_TOOL_MAP = "ktcc_state_tool_remap"
+    BOOT_DELAY = 1.5
 
     def __init__(self, config):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
         self.gcode = self.printer.lookup_object('gcode')
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
+        self.log = logging.getLogger('ktcc.toollock')
+        self.runtime = None
+        self._action_depth = 0
 
-        self.global_offset = [0, 0, 0]    # Global offset to apply to all tools
-        self.saved_fan_speed = 0          # Saved partcooling fan speed when deselecting a tool with a fan.
-        self.tool_current = "-2"          # -2 Unknown tool locked, -1 No tool locked, 0 and up are tools.
+        self.global_offset = [0.0, 0.0, 0.0]
+        self.saved_fan_speed = 0.0
+        self.tool_current = '-2'
+        # Retained as a parsed compatibility option.  The refactored runtime
+        # never performs lock/unlock motion at startup; persisted state is an
+        # estimate and is reconciled transactionally on the first operation.
         self.init_printer_to_last_tool = config.getboolean(
-            'init_printer_to_last_tool', True)
-        self.purge_on_toolchange = config.getboolean(
-            'purge_on_toolchange', True)
+            'init_printer_to_last_tool', True
+        )
+        self.purge_on_toolchange = config.getboolean('purge_on_toolchange', True)
         self.saved_position = None
-        self.restore_position_on_toolchange_type = 0   # 0: Don't restore; 1: Restore XY; 2: Restore XYZ
-        self.log = self.printer.load_object(config, 'ktcclog')
-
-        self.tool_map = {}
+        self.restore_position_on_toolchange_type = 0
         self.last_endstop_query = {}
-        self.changes_made_by_set_all_tool_heaters_off={}
+        self._suspended_heater_modes = {}
 
-        # G-Code macros
-        self.tool_lock_gcode_template = gcode_macro.load_template(config, 'tool_lock_gcode', '')
-        self.tool_unlock_gcode_template = gcode_macro.load_template(config, 'tool_unlock_gcode', '')
+        self.tool_lock_gcode_template = gcode_macro.load_template(
+            config, 'tool_lock_gcode', ''
+        )
+        self.tool_unlock_gcode_template = gcode_macro.load_template(
+            config, 'tool_unlock_gcode', ''
+        )
 
-        # Register commands
         handlers = [
             'SAVE_CURRENT_TOOL', 'TOOL_LOCK', 'TOOL_UNLOCK',
             'KTCC_TOOL_DROPOFF_ALL', 'SET_AND_SAVE_FAN_SPEED',
             'TEMPERATURE_WAIT_WITH_TOLERANCE', 'SET_TOOL_TEMPERATURE',
-            'SET_GLOBAL_OFFSET', 'SET_TOOL_OFFSET',
+            'KTCC_TOOL_M109', 'SET_GLOBAL_OFFSET', 'SET_TOOL_OFFSET',
             'GET_GLOBAL_OFFSET', 'GET_TOOL_OFFSET',
-            'SET_PURGE_ON_TOOLCHANGE', 'SAVE_POSITION', 'SAVE_CURRENT_POSITION',
-            'RESTORE_POSITION', 'KTCC_SET_GCODE_OFFSET_FOR_CURRENT_TOOL',
-            'KTCC_DISPLAY_TOOL_MAP', 'KTCC_REMAP_TOOL', 'KTCC_ENDSTOP_QUERY',
+            'SET_PURGE_ON_TOOLCHANGE', 'SAVE_POSITION',
+            'SAVE_CURRENT_POSITION', 'RESTORE_POSITION',
+            'KTCC_SET_GCODE_OFFSET_FOR_CURRENT_TOOL', 'KTCC_ENDSTOP_QUERY',
             'KTCC_SET_ALL_TOOL_HEATERS_OFF', 'KTCC_RESUME_ALL_TOOL_HEATERS',
-            'KTCC_SET_TOOL_RETRACTION', 'KTCC_GET_TOOL_RETRACTION', 'KTCC_SAVE_TOOL_OFFSET',
-            'KTCC_SET_TOOL_PRESSURE_ADVANCE', 'KTCC_GET_TOOL_PRESSURE_ADVANCE',
-            'KTCC_SAVE_TOOL_PRESSURE_ADVANCE', 'KTCC_APPLY_TOOL_RETRACTION',
+            'KTCC_SET_TOOL_RETRACTION', 'KTCC_GET_TOOL_RETRACTION',
+            'KTCC_SAVE_TOOL_OFFSET', 'KTCC_SET_TOOL_PRESSURE_ADVANCE',
+            'KTCC_GET_TOOL_PRESSURE_ADVANCE',
+            'KTCC_SAVE_TOOL_PRESSURE_ADVANCE',
+            'KTCC_APPLY_TOOL_RETRACTION', 'KTCC_TRANSITION_CHECKPOINT',
+            'KTCC_RECOVERY_STATUS', 'KTCC_RECOVERY_ABORT',
+            'KTCC_RECOVERY_RUN', 'KTCC_RECOVERY_RECONCILE',
+            'KTCC_RECOVERY_CONFIRM', 'KTCC_PREHEAT_TOOL',
+            'KTCC_CANCEL_PREHEAT', 'KTCC_WAIT_TOOL',
+            'KTCC_APPLY_TOOL_PROFILE',
+            'KTCC_DUMP_STATS', 'KTCC_RESET_STATS',
+            'KTCC_INIT_PRINT_STATS', 'KTCC_DUMP_PRINT_STATS',
         ]
-        for cmd in handlers:
-            func = getattr(self, 'cmd_' + cmd)
-            desc = getattr(self, 'cmd_' + cmd + '_help', None)
-            self.gcode.register_command(cmd, func, False, desc)
+        for command in handlers:
+            handler = getattr(self, 'cmd_' + command)
+            description = getattr(self, 'cmd_' + command + '_help', None)
+            self.gcode.register_command(
+                command, handler, when_not_ready=False, desc=description
+            )
+        self.printer.register_event_handler('klippy:ready', self.handle_ready)
 
-        self.printer.register_event_handler("klippy:ready", self.handle_ready)
+    # Lifecycle and compatibility projection -------------------------
 
     def handle_ready(self):
-        # Load persistent Tool remaping.
-        self.tool_map = self.printer.lookup_object('save_variables').allVariables.get(self.VARS_KTCC_TOOL_MAP, {})
-        waketime = self.reactor.monotonic() + self.BOOT_DELAY
-        self.reactor.register_callback(self._bootup_tasks, waketime)
+        self.reactor.register_callback(
+            self._bootup_tasks, self.reactor.monotonic() + self.BOOT_DELAY
+        )
 
     def _bootup_tasks(self, eventtime):
-        try:
-            self.load_tool_offsets()
-        except Exception as e:
-            self.log.always('Warning: Error loading tool offsets: %s' % str(e))
-        try:
-            self.load_global_offset()
-        except Exception as e:
-            self.log.always('Warning: Error loading global offset: %s' % str(e))
-        try:
-            self.load_tool_retractions()
-        except Exception as e:
-            self.log.always('Warning: Error loading tool retractions: %s' % str(e))
-        try:
-            self.load_tool_pressure_advance()
-        except Exception as e:
-            self.log.always('Warning: Error loading tool pressure advance: %s' % str(e))
-        try:
-            if len(self.tool_map) > 0:
-                self.log.always(self._tool_map_to_human_string())
-            self.Initialize_Tool_Lock()
-        except Exception as e:
-            self.log.always('Warning: Error booting up KTCC: %s' % str(e))
+        del eventtime
+        self.runtime = compose_runtime(self.printer, self)
+        state = self.runtime.toolchange.state
+        if state.mode is ChangerMode.IDLE and state.mounted.kind is MountedKind.KNOWN:
+            self.runtime.profiles.activate(state.mounted.tool_id)
+            self.runtime.profiles.apply_offset(state.mounted.tool_id)
+        self._sync_legacy_views()
 
-    def load_tool_offsets(self):
-        save_variables = self.printer.lookup_object('save_variables')
-        for name, value in save_variables.allVariables.items():
-            ktcc_tool_offset_prefix = 'ktcc_tool_offset_'
-            if name.startswith(ktcc_tool_offset_prefix):
-                tool_id = int(name[len(ktcc_tool_offset_prefix):]) # type: ignore
-                tool = self.printer.lookup_object('tool %d' % (tool_id,))
-                if tool is None:
-                    continue
-                try:
-                    tool.set_offset(x_pos=value[0], y_pos=value[1], z_pos=value[2])
-                except Exception as ex:
-                    self.log.error(f'failed to restore tool {tool_id} offsets: {ex}')
+    def _require_runtime(self, gcmd=None):
+        if self.runtime is None:
+            if gcmd is not None:
+                raise gcmd.error('KTCC runtime is not ready')
+            raise self.printer.command_error('KTCC runtime is not ready')
+        return self.runtime
 
-    def save_tool_offsets(self, tool_id):
-        tool = self.printer.lookup_object('tool %d' % (tool_id,))
-        if tool is None:
+    def _require_normal(self, gcmd=None):
+        runtime = self._require_runtime(gcmd)
+        # An adapter-owned action runs synchronously under Klipper's G-code
+        # mutex and may call compatibility commands as part of its recipe.
+        # Console/top-level commands still obey the recovery guard.
+        if getattr(self, '_action_depth', 0) == 0:
+            runtime.toolchange.require_ready()
+        return runtime
+
+    def _flush_statistics(self):
+        """Persist observations without making printer operation depend on them."""
+        if self.runtime is None:
             return
-        save_variables = self.printer.lookup_object('save_variables')
-        save_variables.cmd_SAVE_VARIABLE(self.gcode.create_gcode_command(
-            "SAVE_VARIABLE", "SAVE_VARIABLE", {"VARIABLE": 'ktcc_tool_offset_%d' % (tool_id,), 'VALUE': tool.get_offset()}))
-
-    cmd_KTCC_SAVE_TOOL_OFFSET_help = 'Save the offset of a tool.'
-    def cmd_KTCC_SAVE_TOOL_OFFSET(self, gcmd):
-        tool_id = gcmd.get_int('TOOL', None, minval=0)
-        if tool_id is None:
-            raise gcmd.error('missing tool id')
-        self.save_tool_offsets(tool_id)
-
-    def Initialize_Tool_Lock(self):
-        if not self.init_printer_to_last_tool:
-            return None
-
-        # self.log.always("Initialize_Tool_Lock running.")
-        save_variables = self.printer.lookup_object('save_variables')
         try:
-            self.tool_current = save_variables.allVariables["tool_current"]
+            self.runtime.statistics.flush()
         except Exception:
-            self.tool_current = "-1"
-            save_variables.cmd_SAVE_VARIABLE(self.gcode.create_gcode_command(
-                "SAVE_VARIABLE", "SAVE_VARIABLE", {"VARIABLE": "tool_current", 'VALUE': self.tool_current }))
+            self.log.warning('Unable to persist KTCC statistics.', exc_info=True)
 
-        if str(self.tool_current) == "-1":
-            self.cmd_TOOL_UNLOCK()
-            self.log.always("ToolLock initialized unlocked")
+    def _record_statistics(self, callback):
+        """Keep a statistics observer failure from changing machine behavior."""
+        try:
+            callback()
+        except Exception:
+            self.log.warning('Unable to record KTCC statistics.', exc_info=True)
 
-        else:
-            t = self.tool_current
-            self.ToolLock(True)
-            self.SaveCurrentTool(str(t))
-            self.log.always("ToolLock initialized with T%s." % self.tool_current)
+    def _mounted_tool_id(self):
+        if self.runtime is None:
+            value = int(self.tool_current)
+            return value if value >= 0 else None
+        mounted = self.runtime.toolchange.state.mounted
+        return mounted.tool_id if mounted.kind is MountedKind.KNOWN else None
 
-    def load_tool_retractions(self):
-        save_variables = self.printer.lookup_object('save_variables')
-        for name, value in save_variables.allVariables.items():
-            ktcc_retract_tool_prefix = 'ktcc_tool_retract_'
-            if name.startswith(ktcc_retract_tool_prefix):
-                tool_id = int(name[len(ktcc_retract_tool_prefix):]) # type: ignore
-                tool = self.printer.lookup_object('tool %d' % (tool_id,))
-                if tool is None:
-                    continue
-                try:
-                    tool.set_retract(
-                        retract_length=value.get('retract_length', 0.0),
-                        retract_speed=value.get('retract_speed', 50.0),
-                        unretract_extra_length=value.get('unretract_extra_length', 0.0),
-                        unretract_speed=value.get('unretract_speed', 50.0),
-                    )
-                except Exception as ex:
-                    self.log.error(f'failed to restore tool {tool_id} offsets: {ex}')
+    def _transaction_is_active(self):
+        return (
+            self._action_depth > 0
+            or (
+                self.runtime is not None
+                and self.runtime.toolchange.state.mode is ChangerMode.CHANGING
+            )
+        )
 
-    def save_tool_retractions(self, tool_id):
-        tool = self.printer.lookup_object('tool %d' % (tool_id,))
-        if tool is None:
+    def _sync_legacy_views(self):
+        if self.runtime is None:
             return
-        save_variables = self.printer.lookup_object('save_variables')
-        retract_info = {
-            'retract_length': tool.retract_length,
-            'retract_speed': tool.retract_speed,
-            'unretract_extra_length': tool.unretract_extra_length,
-            'unretract_speed': tool.unretract_speed,
+        self.tool_current = str(self.runtime.toolchange.state.legacy_tool_current())
+        first = self.runtime.bridge.registry.ids[0]
+        global_offset = self.runtime.profiles.offset_state(first).global_offset
+        self.global_offset = [global_offset.x, global_offset.y, global_offset.z]
+        for spec in self.runtime.bridge.registry:
+            tool = self.printer.lookup_object('tool %d' % spec.id.value)
+            profile = self.runtime.profiles.effective(spec.id).profile
+            offset = self.runtime.profiles.offset_state(spec.id)
+            local = offset.session or offset.persisted or offset.configured
+            tool.offset = [local.x, local.y, local.z]
+            retract = profile.print_retraction
+            tool.retract_length = retract.retract_length
+            tool.retract_speed = retract.retract_speed
+            tool.unretract_extra_length = retract.unretract_extra_length
+            tool.unretract_speed = retract.unretract_speed
+            tool.zhop = retract.zhop
+            pressure = profile.pressure_advance
+            tool.pressure_advance = pressure.pressure_advance
+            tool.pressure_advance_smooth_time = pressure.smooth_time
+            thermal = self.runtime.thermal.snapshot(spec.id)
+            tool.heater_active_temp = thermal.active_target
+            tool.heater_standby_temp = thermal.standby_target
+            tool.heater_state = {
+                ThermalMode.OFF: 0,
+                ThermalMode.STANDBY: 1,
+                ThermalMode.PREHEAT: 2,
+                ThermalMode.ACTIVE: 2,
+            }[thermal.mode]
+
+    def get_status(self, eventtime=None):
+        del eventtime
+        self._sync_legacy_views()
+        return {
+            'global_offset': self.global_offset,
+            'tool_current': self.tool_current,
+            'saved_fan_speed': self.saved_fan_speed,
+            'purge_on_toolchange': self.purge_on_toolchange,
+            'restore_position_on_toolchange_type': self.restore_position_on_toolchange_type,
+            'saved_position': self.saved_position,
+            'last_endstop_query': self.last_endstop_query,
+            'changer_mode': (
+                None if self.runtime is None
+                else self.runtime.toolchange.state.mode.value
+            ),
         }
-        save_variables.cmd_SAVE_VARIABLE(self.gcode.create_gcode_command(
-            "SAVE_VARIABLE", "SAVE_VARIABLE", {"VARIABLE": 'ktcc_tool_retract_%d' % (tool_id,), 'VALUE': retract_info}))
-        self.log.trace(f'saved tool {tool_id} retraction: {retract_info}')
 
-    cmd_KTCC_SET_TOOL_RETRACTION_help = 'Set retraction length of tool or tools.'
-    def cmd_KTCC_SET_TOOL_RETRACTION(self, gcmd):
-        tool_id = gcmd.get_int('TOOL', None)
-        retract_length = gcmd.get_float('LENGTH', None)
-        retract_speed = gcmd.get_float('SPEED', None)
-        unretract_extra_length = gcmd.get_float('EXTRA', None)
-        unretract_speed = gcmd.get_float('PRIME_SPEED', None)
-        zhop = gcmd.get_float('ZHOP', None)
-        if tool_id is None:
-            tool_id = int(self.tool_current)
-            if tool_id < 0:
-                raise gcmd.error('missing tool id')
-        tool = self.printer.lookup_object('tool %d' % (tool_id,), None)
-        if not tool:
-            raise gcmd.error('invalid tool specified')
-        if retract_length is None:
-            retract_length = tool.retract_length
-        if unretract_extra_length is None:
-            unretract_extra_length = tool.unretract_extra_length
-        if retract_speed is None:
-            retract_speed = tool.retract_speed
-        if unretract_speed is None:
-            unretract_speed = tool.unretract_speed
-        # send to the tool
-        tool.set_retract(retract_length=retract_length, retract_speed=retract_speed,
-                        unretract_extra_length=unretract_extra_length,
-                        unretract_speed=unretract_speed, zhop=zhop)
-        # apply if it's current tool
-        if tool_id == int(self.tool_current):
-            tool.apply_retract_options()
-        # persist tool
-        self.save_tool_retractions(tool_id)
+    # Changer and lock commands ---------------------------------------
 
-    cmd_KTCC_APPLY_TOOL_RETRACTION_help = 'Apply retraction length of tool or tools.'
-    def cmd_KTCC_APPLY_TOOL_RETRACTION(self, gcmd):
-        if int(self.tool_current) >= 0:
-            tool = self.printer.lookup_object('tool %d' % (int(self.tool_current),), None)
-            tool.apply_retract_options()
-
-    cmd_KTCC_GET_TOOL_RETRACTION_help = 'Get retraction length of a tool or tools'
-    def cmd_KTCC_GET_TOOL_RETRACTION(self, gcmd):
-        tool_id = gcmd.get_int('TOOL', None)
-        if tool_id is not None:
-            tool = self.printer.lookup_object('tool %d' % (tool_id,), None)
-            if not tool:
-                raise gcmd.error('invalid tool specified')
-            gcmd.respond_info("TOOL %d: RETRACT_LENGTH=%.5f RETRACT_SPEED=%.5f"
-                                " UNRETRACT_EXTRA_LENGTH=%.5f UNRETRACT_SPEED=%.5f"
-                                " ZHOP=%.5f"
-                                % (tool_id, tool.retract_length, tool.retract_speed,
-                                    tool.unretract_extra_length, tool.unretract_speed,
-                                    tool.zhop))
+    def SaveCurrentTool(self, value):
+        value = int(value)
+        if self._transaction_is_active():
             return
-        # if no tool specified, show all tools
-        for i in range(99):
-            tool = self.printer.lookup_object('tool %d' % (i,), None)
-            if not tool:
-                continue
-            gcmd.respond_info("TOOL %d: RETRACT_LENGTH=%.5f RETRACT_SPEED=%.5f"
-                                " UNRETRACT_EXTRA_LENGTH=%.5f UNRETRACT_SPEED=%.5f"
-                                " ZHOP=%.5f"
-                                % (i, tool.retract_length, tool.retract_speed,
-                                    tool.unretract_extra_length, tool.unretract_speed,
-                                    tool.zhop))
+        self._require_runtime().toolchange.declare_current_tool(value)
+        self._sync_legacy_views()
+        self._flush_statistics()
 
-    cmd_KTCC_SET_TOOL_PRESSURE_ADVANCE_help = 'Set pressure advance of tool'
-    def cmd_KTCC_SET_TOOL_PRESSURE_ADVANCE(self, gcmd):
-        tool_id = gcmd.get_int('TOOL', None)
-        extruder_name = gcmd.get('EXTRUDER', None)
-        if tool_id is None and extruder_name is None:
-            tool_id = int(self.tool_current)
-            if tool_id < 0:
-                raise gcmd.error('missing tool id')
+    def cmd_SAVE_CURRENT_TOOL(self, gcmd):
+        value = gcmd.get_int('T', None, minval=-2)
+        if value is not None:
+            self.SaveCurrentTool(value)
 
-        pressure_advance = gcmd.get_float('ADVANCE', None)
-        smooth_time = gcmd.get_float('SMOOTH_TIME', None)
-        if pressure_advance is None and smooth_time is None:
-            raise gcmd.error('missing parameter')
-
-        if tool_id is not None:
-            tool = self.printer.lookup_object('tool %d' % (tool_id,), None)
-            if not tool:
-                raise gcmd.error('invalid tool specified')
-        else:
-            # if no tool specified, search for extruder name
-            for i in range(99):
-                tool = self.printer.lookup_object('tool %d' % (i,), None)
-                if not tool:
-                    continue
-                if tool.extruder == extruder_name:
-                    tool_id = i
-                    break
-            else:
-                raise gcmd.error('invalid extruder specified')
-
-        # send to the tool
-        tool.set_pressure_advance(pressure_advance=pressure_advance, smooth_time=smooth_time)
-
-    cmd_KTCC_GET_TOOL_PRESSURE_ADVANCE_help = 'Get pressure advance of a tool'
-    def cmd_KTCC_GET_TOOL_PRESSURE_ADVANCE(self, gcmd):
-        tool_id = gcmd.get_int('TOOL', None)
-        if tool_id is not None:
-            tool = self.printer.lookup_object('tool %d' % (tool_id,), None)
-            if not tool:
-                raise gcmd.error('invalid tool specified')
-            gcmd.respond_info("TOOL %d: ADVANCE=%.5f SMOOTH_TIME=%.5f"
-                                % (tool_id, tool.pressure_advance, tool.pressure_advance_smooth_time,))
-            return
-        # if no tool specified, show all tools
-        for i in range(99):
-            tool = self.printer.lookup_object('tool %d' % (i,), None)
-            if not tool:
-                continue
-            gcmd.respond_info("TOOL %d: ADVANCE=%.5f SMOOTH_TIME=%.5f"
-                                % (i, tool.pressure_advance, tool.pressure_advance_smooth_time,))
-
-    cmd_KTCC_SAVE_TOOL_PRESSURE_ADVANCE_help = 'Save the pressure advance of a tool'
-    def cmd_KTCC_SAVE_TOOL_PRESSURE_ADVANCE(self, gcmd):
-        tool_id = gcmd.get_int('TOOL', None, minval=0)
-        if tool_id is None:
-            raise gcmd.error('missing tool id')
-        self.save_tool_pressure_advance(tool_id)
-
-    def save_tool_pressure_advance(self, tool_id):
-        tool = self.printer.lookup_object('tool %d' % (tool_id,))
-        if tool is None:
-            return
-        save_variables = self.printer.lookup_object('save_variables')
-        pa_info = {
-            'pressure_advance': tool.pressure_advance,
-            'smooth_time': tool.pressure_advance_smooth_time,
-        }
-        save_variables.cmd_SAVE_VARIABLE(self.gcode.create_gcode_command(
-            "SAVE_VARIABLE", "SAVE_VARIABLE", {"VARIABLE": 'ktcc_tool_pa_info_%d' % (tool_id,), 'VALUE': pa_info}))
-
-    def load_tool_pressure_advance(self):
-        save_variables = self.printer.lookup_object('save_variables')
-        for name, value in save_variables.allVariables.items():
-            ktcc_tool_pa_info_prefix = 'ktcc_tool_pa_info_'
-            if name.startswith(ktcc_tool_pa_info_prefix):
-                tool_id = int(name[len(ktcc_tool_pa_info_prefix):]) # type: ignore
-                tool = self.printer.lookup_object('tool %d' % (tool_id,))
-                if tool is None:
-                    continue
-                try:
-                    tool.set_pressure_advance(
-                        pressure_advance=value.get('pressure_advance', 0.0),
-                        smooth_time=value.get('smooth_time', 0.04),
-                    )
-                except Exception as ex:
-                    self.log.always(f'failed to restore tool {tool_id} pressure advance: {ex}')
-
-    cmd_TOOL_LOCK_help = "Lock the ToolLock."
-    def cmd_TOOL_LOCK(self, gcmd = None):
+    def cmd_TOOL_LOCK(self, gcmd=None):
         self.ToolLock()
 
-    def ToolLock(self, ignore_locked = False):
-        self.log.trace("TOOL_LOCK running. ")
-        if not ignore_locked and int(self.tool_current) != -1:
-            self.log.always("TOOL_LOCK is already locked with tool " + self.tool_current + ".")
-        else:
+    def ToolLock(self, ignore_locked=False):
+        if self._transaction_is_active():
             self.tool_lock_gcode_template.run_gcode_from_command()
-            self.SaveCurrentTool("-2")
-            self.log.trace("Tool Locked")
-            self.log.increase_statistics('total_toollocks')
+            self._record_statistics(
+                self._require_runtime().statistics.lock_completed
+            )
+            return
+        self._require_normal()
+        if not ignore_locked and int(self.tool_current) != self.TOOL_UNLOCKED:
+            self.log.info('TOOL_LOCK is already locked with tool %s.', self.tool_current)
+            return
+        self.tool_lock_gcode_template.run_gcode_from_command()
+        self._record_statistics(self._require_runtime().statistics.lock_completed)
+        self.SaveCurrentTool(self.TOOL_UNKNOWN)
 
-
-    cmd_KTCC_TOOL_DROPOFF_ALL_help = "Deselect all tools"
-    def cmd_KTCC_TOOL_DROPOFF_ALL(self, gcmd = None):
-        self.log.trace("KTCC_TOOL_DROPOFF_ALL running. ")# + gcmd.get_raw_command_parameters())
-        if self.tool_current == "-2":
-            raise self.printer.command_error("cmd_KTCC_TOOL_DROPOFF_ALL: Unknown tool already mounted Can't park unknown tool.")
-        if self.tool_current != "-1":
-            self.printer.lookup_object('tool ' + str(self.tool_current)).Dropoff( force_virtual_unload = True )
-
-
-        try:
-            # Need to check all tools at least once but reload them after each time.
-            all_checked_once = False
-            while not all_checked_once:
-                all_tools = dict(self.printer.lookup_objects('tool'))
-                all_checked_once =True # If no breaks in next For loop then we can exit the While loop.
-                for tool_name, tool in all_tools.items():
-                    # If there is a virtual tool loaded:
-                    if tool.get_status()["virtual_loaded"] > self.TOOL_UNLOCKED:
-                        # Pickup and then unload and drop the tool.
-                        self.log.trace("cmd_KTCC_TOOL_DROPOFF_ALL: Picking up and dropping forced: %s." % str(tool.get_status()["virtual_loaded"]))
-                        self.printer.lookup_object("tool " + str(tool.get_status()["virtual_loaded"])).select_tool_actual()
-                        self.printer.lookup_object("tool " + str(tool.get_status()["virtual_loaded"])).Dropoff( force_virtual_unload = True )
-                        all_checked_once =False # Do not exit while loop.
-                        break # Break for loop to start again.
-
-        except Exception as e:
-            raise Exception('cmd_KTCC_TOOL_DROPOFF_ALL: Error: %s' % str(e))
-
-    cmd_TOOL_UNLOCK_help = "Unlock the ToolLock."
-    def cmd_TOOL_UNLOCK(self, gcmd = None):
-        self.log.trace("TOOL_UNLOCK running. ")
+    def cmd_TOOL_UNLOCK(self, gcmd=None):
+        if not self._transaction_is_active():
+            self._require_normal(gcmd)
         self.tool_unlock_gcode_template.run_gcode_from_command()
-        self.SaveCurrentTool(-1)
-        self.log.trace("ToolLock Unlocked.")
-        self.log.increase_statistics('total_toolunlocks')
+        self._record_statistics(self._require_runtime().statistics.unlock_completed)
+        if not self._transaction_is_active():
+            self.SaveCurrentTool(self.TOOL_UNLOCKED)
 
+    def cmd_KTCC_TOOL_DROPOFF_ALL(self, gcmd=None):
+        runtime = self._require_normal(gcmd)
+        source = self._mounted_tool_id()
+        try:
+            runtime.toolchange.drop_all()
+            if source is not None:
+                fan = runtime.bridge.registry[source].fan
+                if fan is not None:
+                    runtime.machine.set_fan(fan, 0.0)
+        finally:
+            self._sync_legacy_views()
+            self._flush_statistics()
 
-    def PrinterIsHomedForToolchange(self, lazy_home_when_parking =0):
-        curtime = self.printer.get_reactor().monotonic()
-        toolhead = self.printer.lookup_object('toolhead')
-        homed = toolhead.get_status(curtime)['homed_axes'].lower()
-        if all(axis in homed for axis in ['x','y','z']):
+    # Statistics commands --------------------------------------------
+
+    def cmd_KTCC_DUMP_STATS(self, gcmd):
+        runtime = self._require_runtime(gcmd)
+        self._flush_statistics()
+        gcmd.respond_info(format_statistics(runtime.statistics.snapshot()))
+
+    def cmd_KTCC_RESET_STATS(self, gcmd):
+        runtime = self._require_runtime(gcmd)
+        if gcmd.get('SURE', '').strip().upper() != 'YES':
+            gcmd.respond_info('Run KTCC_RESET_STATS SURE=YES to confirm reset.')
+            return
+        runtime.statistics.reset()
+        self._flush_statistics()
+        gcmd.respond_info(format_statistics(runtime.statistics.snapshot()))
+        gcmd.respond_info('Statistics RESET.')
+
+    def cmd_KTCC_INIT_PRINT_STATS(self, gcmd):
+        runtime = self._require_runtime(gcmd)
+        runtime.statistics.begin_print()
+
+    def cmd_KTCC_DUMP_PRINT_STATS(self, gcmd):
+        runtime = self._require_runtime(gcmd)
+        self._flush_statistics()
+        gcmd.respond_info(
+            format_print_statistics(runtime.statistics.print_snapshot())
+        )
+
+    def PrinterIsHomedForToolchange(self, lazy_home_when_parking=0):
+        status = self.printer.lookup_object('toolhead').get_status(
+            self.reactor.monotonic()
+        )
+        homed = status['homed_axes'].lower()
+        missing = ''.join(axis for axis in 'xyz' if axis not in homed)
+        if not missing:
             return True
-        elif lazy_home_when_parking == 0 and not all(axis in homed for axis in ['x','y','z']):
+        if lazy_home_when_parking == 0 or (
+            lazy_home_when_parking == 1 and 'z' in missing
+        ):
             return False
-        elif lazy_home_when_parking == 1 and 'z' not in homed:
-            return False
-
-        axes_to_home = ""
-        for axis in ['x', 'y', 'z']:
-            if axis not in homed:
-                axes_to_home += axis
-        self.gcode.run_script_from_command("G28 " + axes_to_home.upper())
+        self.gcode.run_script_from_command('G28 ' + missing.upper())
         return True
 
-    def SaveCurrentTool(self, t):
-        self.tool_current = str(t)
-        save_variables = self.printer.lookup_object('save_variables')
-        save_variables.cmd_SAVE_VARIABLE(self.gcode.create_gcode_command(
-            "SAVE_VARIABLE", "SAVE_VARIABLE", {"VARIABLE": "tool_current", 'VALUE': t}))
+    # Profile commands ------------------------------------------------
 
-    cmd_SAVE_CURRENT_TOOL_help = "Save the current tool to file to load at printer startup."
-    def cmd_SAVE_CURRENT_TOOL(self, gcmd):
-        t = gcmd.get_int('T', None, minval=-2)
-        if t is not None:
-            self.SaveCurrentTool(t)
-
-    cmd_SET_AND_SAVE_FAN_SPEED_help = "Save the fan speed to be recovered at ToolChange."
-    def cmd_SET_AND_SAVE_FAN_SPEED(self, gcmd):
-        fanspeed = gcmd.get_float('S', 1, minval=0, maxval=255)
-        tool_id = gcmd.get_int('P', int(self.tool_current), minval=0)
-
-        # The minval above doesn't seem to work.
-        if tool_id < 0:
-            self.log.always("cmd_SET_AND_SAVE_FAN_SPEED: Invalid tool:"+str(tool_id))
-            return None
-
-        # self.log.trace("ToolLock.cmd_SET_AND_SAVE_FAN_SPEED: Change fan speed for T%s to %f." % (str(tool_id), fanspeed))
-
-        # If value is >1 asume it is given in 0-255 and convert to percentage.
-        if fanspeed > 1:
-            fanspeed=float(fanspeed / 255.0)
-
-        self.SetAndSaveFanSpeed(tool_id, fanspeed)
-
-    #
-    # Todo:
-    # Implement Fan Scale. Inspired by https://github.com/jschuh/klipper-macros/blob/main/fans.cfg
-    # Can change fan scale for diffrent materials or tools from slicer. Maybe max and min too?
-    #
-    def SetAndSaveFanSpeed(self, tool_id, fanspeed):
-        # Check if the requested tool has been remaped to another one.
-        tool_is_remaped = self.tool_is_remaped(int(tool_id))
-        if tool_is_remaped > -1:
-            tool_id = tool_is_remaped
-
-
-        tool = self.printer.lookup_object("tool " + str(tool_id))
-
-        if tool.fan is None:
-            self.log.debug("ToolLock.SetAndSaveFanSpeed: Tool %s has no fan." % str(tool_id))
-        else:
-            self.SaveFanSpeed(fanspeed)
-            self.gcode.run_script_from_command(
-                "SET_FAN_SPEED FAN=%s SPEED=%f" %
-                (tool.fan,
-                fanspeed))
-
-    cmd_TEMPERATURE_WAIT_WITH_TOLERANCE_help = "Waits for current tool temperature, or a specified (TOOL) tool or (HEATER) heater's temperature within (TOLERANCE) tolerance."
-#  Waits for all temperatures, or a specified tool or heater's temperature.
-#  This command can be used without any additional parameters.
-#  Without parameters it waits for bed and current extruder.
-#  Only one of either P or H may be used.
-#
-#  TOOL=nnn Tool number.
-#  HEATER=nnn Heater number. 0="heater_bed", 1="extruder", 2="extruder1", etc.
-#  TOLERANCE=nnn Tolerance in degC. Defaults to 1*C. Wait will wait until heater is between set temperature +/- tolerance.
-    def cmd_TEMPERATURE_WAIT_WITH_TOLERANCE(self, gcmd):
-        curtime = self.printer.get_reactor().monotonic()
-        heater_name = None
-        tool_id = gcmd.get_int('TOOL', None, minval=0)
-        heater_id = gcmd.get_int('HEATER', None, minval=0)
-        tolerance = gcmd.get_int('TOLERANCE', 1, minval=0, maxval=50)
-
-        if tool_id is not None and heater_id is not None:
-            self.log.always("cmd_TEMPERATURE_WAIT_WITH_TOLERANCE: Can't use both P and H parameter at the same time.")
-            return None
-        elif tool_id is None and heater_id is None:
-            tool_id = self.tool_current
-            if int(self.tool_current) >= 0:
-                heater_name = self.printer.lookup_object(
-                    "tool " + str(self.tool_current)).get_status()["extruder"]
-            #wait for bed
-            self._Temperature_wait_with_tolerance(curtime, "heater_bed", tolerance)
-
-        else:                                               # Only heater or tool is specified
-            if tool_id is not None:
-                # Check if the requested tool has been remaped to another one.
-                tool_is_remaped = self.tool_is_remaped(int(tool_id))
-                if tool_is_remaped > -1:
-                    tool_id = tool_is_remaped
-
-                heater_name = self.printer.lookup_object(   # Set the heater_name to the extruder of the tool.
-                    "tool " + str(tool_id)).get_status(curtime)["extruder"]
-            elif heater_id == 0:                            # Else If 0, then heater_bed.
-                heater_name = "heater_bed"                      # Set heater_name to "heater_bed".
-
-            elif heater_id == 1:                            # Else If h is 1 then use for first extruder.
-                heater_name = "extruder"                        # Set heater_name to first extruder which has no number.
-            else:                                           # Else is another heater number.
-                heater_name = "extruder" + str(heater_id - 1)   # Because bed is heater_number 0 extruders will be numbered one less than H parameter.
-        if heater_name is not None:
-            self._Temperature_wait_with_tolerance(curtime, heater_name, tolerance)
-
-
-    def _Temperature_wait_with_tolerance(self, curtime, heater_name, tolerance):
-        target_temp = int(self.printer.lookup_object(       # Get the heaters target temperature.
-                    heater_name).get_status(curtime)["target"]
-                          )
-
-        if target_temp > 40:                                # Only wait if set temperature is over 40*C
-            self.log.always("Wait for heater " + heater_name + " to reach " + str(target_temp) + " with a tolerance of " + str(tolerance) + ".")
-            self.gcode.run_script_from_command(
-                "TEMPERATURE_WAIT SENSOR=" + heater_name +
-                " MINIMUM=" + str(target_temp - tolerance) +
-                " MAXIMUM=" + str(target_temp + tolerance) )
-            self.log.always("Wait for heater " + heater_name + " complete.")
-
-    def _get_tool_id_from_gcmd(self, gcmd):
-        tool_id = gcmd.get_int('TOOL', None, minval=0)
-
+    def _tool_id(self, gcmd, *, allow_extruder=False):
+        tool_id = gcmd.get_int('TOOL', None)
+        if tool_id is None and allow_extruder:
+            extruder = gcmd.get('EXTRUDER', None)
+            if extruder is not None:
+                matches = [
+                    spec.id.value for spec in self.runtime.bridge.registry
+                    if spec.extruder.value == extruder
+                ]
+                if len(matches) != 1:
+                    raise gcmd.error('invalid extruder specified')
+                return matches[0]
         if tool_id is None:
-            tool_id = self.tool_current
-        if not int(tool_id) > self.TOOL_UNLOCKED:
-            self.log.always("_get_tool_id_from_gcmd: Tool " + str(tool_id) + " is not valid.")
-            return None
-        else:
-            # Check if the requested tool has been remaped to another one.
-            tool_is_remaped = self.tool_is_remaped(int(tool_id))
-            if tool_is_remaped > self.TOOL_UNLOCKED:
-                tool_id = tool_is_remaped
+            tool_id = self._mounted_tool_id()
+        if tool_id is None or self.runtime.bridge.registry.get(tool_id) is None:
+            raise gcmd.error('missing or invalid tool id')
         return tool_id
 
+    def cmd_KTCC_SET_TOOL_RETRACTION(self, gcmd):
+        runtime = self._require_normal(gcmd)
+        tool_id = self._tool_id(gcmd)
+        current = runtime.profiles.effective(tool_id).profile.print_retraction
+        profile = FirmwareRetractionProfile(
+            gcmd.get_float('LENGTH', current.retract_length, minval=0),
+            gcmd.get_float('SPEED', current.retract_speed, above=0),
+            gcmd.get_float('EXTRA', current.unretract_extra_length, minval=0),
+            gcmd.get_float('PRIME_SPEED', current.unretract_speed, above=0),
+            gcmd.get_float('ZHOP', current.zhop, minval=0),
+        )
+        runtime.profiles.update_retraction(
+            tool_id, profile, mounted_tool=self._mounted_tool_id()
+        )
+        self._sync_legacy_views()
 
-    cmd_SET_TOOL_TEMPERATURE_help = "Waits for all temperatures, or a specified (TOOL) tool or (HEATER) heater's temperature within (TOLERANCE) tolerance."
-#  Set tool temperature.
-#  TOOL= Tool number, optional. If this parameter is not provided, the current tool is used.
-#  STDB_TMP= Standby temperature(s), optional
-#  ACTV_TMP= Active temperature(s), optional
-#  CHNG_STATE = Change Heater State, optional: 0 = off, 1 = standby temperature(s), 2 = active temperature(s).
-#  STDB_TIMEOUT = Time in seconds to wait between changing heater state to standby and setting heater target temperature to standby temperature when standby temperature is lower than tool temperature.
-#      Use for example 0.1 to change immediately to standby temperature.
-#  SHTDWN_TIMEOUT = Time in seconds to wait from docking tool to shutting off the heater, optional.
-#      Use for example 86400 to wait 24h if you want to disable shutdown timer.
-    def cmd_SET_TOOL_TEMPERATURE(self, gcmd):
-        tool_id = self._get_tool_id_from_gcmd(gcmd)
-        if tool_id is None: return
+    def cmd_KTCC_APPLY_TOOL_RETRACTION(self, gcmd):
+        runtime = self._require_normal(gcmd)
+        mounted = self._mounted_tool_id()
+        if mounted is not None:
+            runtime.profiles.reapply(mounted)
+            self._sync_legacy_views()
 
-        stdb_tmp = gcmd.get_float('STDB_TMP', None, minval=0)
-        actv_tmp = gcmd.get_float('ACTV_TMP', None, minval=0)
-        chng_state = gcmd.get_int('CHNG_STATE', None, minval=0, maxval=2)
-        stdb_timeout = gcmd.get_float('STDB_TIMEOUT', None, minval=0)
-        shtdwn_timeout = gcmd.get_float('SHTDWN_TIMEOUT', None, minval=0)
+    def cmd_KTCC_GET_TOOL_RETRACTION(self, gcmd):
+        runtime = self._require_normal(gcmd)
+        requested = gcmd.get_int('TOOL', None, minval=0)
+        tool_ids = (
+            [requested] if requested is not None
+            else [spec.id.value for spec in runtime.bridge.registry]
+        )
+        for tool_id in tool_ids:
+            profile = runtime.profiles.effective(tool_id).profile.print_retraction
+            gcmd.respond_info(
+                'TOOL %d: RETRACT_LENGTH=%.5f RETRACT_SPEED=%.5f '
+                'UNRETRACT_EXTRA_LENGTH=%.5f UNRETRACT_SPEED=%.5f ZHOP=%.5f'
+                % (tool_id, profile.retract_length, profile.retract_speed,
+                   profile.unretract_extra_length, profile.unretract_speed,
+                   profile.zhop)
+            )
 
-        if self.printer.lookup_object("tool " + str(tool_id)).get_status()["extruder"] is None:
-            self.log.trace("cmd_SET_TOOL_TEMPERATURE: T%s has no extruder! Nothing to do." % str(tool_id))
-            return None
+    def cmd_KTCC_SET_TOOL_PRESSURE_ADVANCE(self, gcmd):
+        runtime = self._require_normal(gcmd)
+        tool_id = self._tool_id(gcmd, allow_extruder=True)
+        current = runtime.profiles.effective(tool_id).profile.pressure_advance
+        advance = gcmd.get_float('ADVANCE', None, minval=0)
+        smooth = gcmd.get_float('SMOOTH_TIME', None, minval=0, maxval=0.2)
+        if advance is None and smooth is None:
+            raise gcmd.error('missing ADVANCE or SMOOTH_TIME')
+        runtime.profiles.update_pressure_advance(
+            tool_id,
+            PressureAdvanceProfile(
+                current.pressure_advance if advance is None else advance,
+                current.smooth_time if smooth is None else smooth,
+            ),
+        )
+        self._sync_legacy_views()
 
-        tool = self.printer.lookup_object("tool " + str(tool_id))
-        set_heater_cmd = {}
+    def cmd_KTCC_GET_TOOL_PRESSURE_ADVANCE(self, gcmd):
+        runtime = self._require_normal(gcmd)
+        requested = gcmd.get_int('TOOL', None, minval=0)
+        tool_ids = (
+            [requested] if requested is not None
+            else [spec.id.value for spec in runtime.bridge.registry]
+        )
+        for tool_id in tool_ids:
+            profile = runtime.profiles.effective(tool_id).profile.pressure_advance
+            gcmd.respond_info(
+                'TOOL %d: ADVANCE=%.5f SMOOTH_TIME=%.5f'
+                % (tool_id, profile.pressure_advance, profile.smooth_time)
+            )
 
-        if stdb_tmp is not None:
-            set_heater_cmd["heater_standby_temp"] = int(stdb_tmp)
-        if actv_tmp is not None:
-            set_heater_cmd["heater_active_temp"] = int(actv_tmp)
-        if stdb_timeout is not None:
-            set_heater_cmd["idle_to_standby_time"] = stdb_timeout
-        if shtdwn_timeout is not None:
-            set_heater_cmd["idle_to_powerdown_time"] = shtdwn_timeout
-        if chng_state is not None:
-            set_heater_cmd["heater_state"] = chng_state
-            # tool.set_heater(heater_state= chng_state)
-        if len(set_heater_cmd) > 0:
-            tool.set_heater(**set_heater_cmd)
-        else:
-            # Print out the current set of temperature settings for the tool if no changes are provided.
-            msg = "T%s Current Temperature Settings" % str(tool_id)
-            msg += "\n Active temperature %s - %d*C - Active to Standby timer: %d seconds" % ( "*" if tool.heater_state == 2 else " ", tool.heater_active_temp, tool.idle_to_standby_time)
-            msg += "\n Standby temperature %s - %d*C - Standby to Off timer: %d seconds" % ( "*" if tool.heater_state == 1 else " ", tool.heater_standby_temp, tool.idle_to_powerdown_time)
-            if tool.heater_state != 3:
-                if tool.timer_idle_to_standby.get_status()["next_wake"] == True:
-                    msg += "\n Will go to standby temperature in in %s seconds." % tool.timer_idle_to_standby.get_status()["next_wake"]
-                if tool.timer_idle_to_powerdown.get_status()["counting_down"] == True:
-                    msg += "\n Will power down in %s seconds." % tool.timer_idle_to_powerdown.get_status()["next_wake"]
-            gcmd.respond_info(msg)
+    def cmd_KTCC_SAVE_TOOL_PRESSURE_ADVANCE(self, gcmd):
+        runtime = self._require_normal(gcmd)
+        tool_id = self._tool_id(gcmd)
+        profile = runtime.profiles.effective(tool_id).profile.pressure_advance
+        runtime.profiles.update_pressure_advance(tool_id, profile, persist=True)
+        self._sync_legacy_views()
 
-    cmd_KTCC_SET_ALL_TOOL_HEATERS_OFF_help = "Turns off all heaters and saves changes made to be resumed by KTCC_RESUME_ALL_TOOL_HEATERS."
-    def cmd_KTCC_SET_ALL_TOOL_HEATERS_OFF(self, gcmd):
-        self.set_all_tool_heaters_off()
-
-    def set_all_tool_heaters_off(self):
-        all_tools = dict(self.printer.lookup_objects('tool'))
-        self.changes_made_by_set_all_tool_heaters_off = {}
-
-        try:
-            for tool_name, tool in all_tools.items():
-                if tool.get_status()["extruder"] is None:
-                    # self.log.trace("set_all_tool_heaters_off: T%s has no extruder! Nothing to do." % str(tool_name))
-                    continue
-                if tool.get_status()["heater_state"] == 0:
-                    # self.log.trace("set_all_tool_heaters_off: T%s already off! Nothing to do." % str(tool_name))
-                    continue
-                self.log.trace("set_all_tool_heaters_off: T%s saved with heater_state: %str." % ( str(tool_name), str(tool.get_status()["heater_state"])))
-                self.changes_made_by_set_all_tool_heaters_off[tool_name] = tool.get_status()["heater_state"]
-                tool.set_heater(heater_state = 0, heater_active_temp = 0, heater_standby_temp = 0)
-        except Exception as e:
-            raise Exception('set_all_tool_heaters_off: Error: %s' % str(e))
-
-    cmd_KTCC_RESUME_ALL_TOOL_HEATERS_help = "Resumes all heaters previously turned off by KTCC_SET_ALL_TOOL_HEATERS_OFF."
-    def cmd_KTCC_RESUME_ALL_TOOL_HEATERS(self, gcmd):
-        self.resume_all_tool_heaters()
-
-    def resume_all_tool_heaters(self):
-        try:
-            # Loop it 2 times, first for all heaters standby and then the active.
-
-            for tool_name, v in self.changes_made_by_set_all_tool_heaters_off.items():
-                if v == 1:
-                    self.printer.lookup_object(str(tool_name)).set_heater(heater_state = v)
-
-            for tool_name, v in self.changes_made_by_set_all_tool_heaters_off.items():
-                if v == 2:
-                    self.printer.lookup_object(str(tool_name)).set_heater(heater_state = v)
-
-        except Exception as e:
-            raise Exception('set_all_tool_heaters_off: Error: %s' % str(e))
-
-
-    cmd_SET_TOOL_OFFSET_help = "Set an individual tool offset"
     def cmd_SET_TOOL_OFFSET(self, gcmd):
-        tool_id = self._get_tool_id_from_gcmd(gcmd)
-        if tool_id is None:
-            tool_id = int(self.tool_current)
-            if tool_id < 0:
-                return
+        runtime = self._require_normal(gcmd)
+        tool_id = self._tool_id(gcmd)
+        state = runtime.profiles.offset_state(tool_id)
+        local = state.session or state.persisted or state.configured
+        values = []
+        for axis, original in zip('XYZ', (local.x, local.y, local.z)):
+            absolute = gcmd.get_float(axis, None)
+            adjust = gcmd.get_float(axis + '_ADJUST', None)
+            values.append(
+                absolute if absolute is not None
+                else original + (0.0 if adjust is None else adjust)
+            )
+        runtime.profiles.update_session_tool_offset(
+            tool_id, Vector3(*values)
+        )
+        self._sync_legacy_views()
 
-        x_pos = gcmd.get_float('X', None)
-        x_adjust = gcmd.get_float('X_ADJUST', None)
-        y_pos = gcmd.get_float('Y', None)
-        y_adjust = gcmd.get_float('Y_ADJUST', None)
-        z_pos = gcmd.get_float('Z', None)
-        z_adjust = gcmd.get_float('Z_ADJUST', None)
+    def cmd_KTCC_SAVE_TOOL_OFFSET(self, gcmd):
+        runtime = self._require_normal(gcmd)
+        tool_id = self._tool_id(gcmd)
+        state = runtime.profiles.offset_state(tool_id)
+        offset = state.session or state.persisted or state.configured
+        runtime.profiles.update_tool_offset(
+            tool_id, offset, mounted_tool=self._mounted_tool_id()
+        )
+        self._sync_legacy_views()
 
-        tool = self.printer.lookup_object("tool " + str(tool_id))
-        set_offset_cmd = {}
-
-        if x_pos is not None:
-            set_offset_cmd["x_pos"] = x_pos
-        elif x_adjust is not None:
-            set_offset_cmd["x_adjust"] = x_adjust
-        if y_pos is not None:
-            set_offset_cmd["y_pos"] = y_pos
-        elif y_adjust is not None:
-            set_offset_cmd["y_adjust"] = y_adjust
-        if z_pos is not None:
-            set_offset_cmd["z_pos"] = z_pos
-        elif z_adjust is not None:
-            set_offset_cmd["z_adjust"] = z_adjust
-        if len(set_offset_cmd) > 0:
-            tool.set_offset(**set_offset_cmd)
-
-    cmd_GET_TOOL_OFFSET_help = "Get an individual tool offset"
     def cmd_GET_TOOL_OFFSET(self, gcmd):
-        tool_id = self._get_tool_id_from_gcmd(gcmd)
-        if tool_id is None:
-            tool_id = int(self.tool_current)
-            if tool_id < 0:
-                return
-        tool = self.printer.lookup_object("tool " + str(tool_id))
-        offset = tool.get_offset()
-        gcmd.respond_info(f"TOOL {tool_id}: OFFSET={offset[0]}, {offset[1]}, {offset[2]}")
+        runtime = self._require_normal(gcmd)
+        tool_id = self._tool_id(gcmd)
+        state = runtime.profiles.offset_state(tool_id)
+        local = state.session or state.persisted or state.configured
+        gcmd.respond_info(
+            'TOOL %d: OFFSET=%g, %g, %g' % (tool_id, local.x, local.y, local.z)
+        )
 
-    cmd_SET_GLOBAL_OFFSET_help = "Set the global tool offset"
     def cmd_SET_GLOBAL_OFFSET(self, gcmd):
-        x_pos = gcmd.get_float('X', None)
-        x_adjust = gcmd.get_float('X_ADJUST', None)
-        y_pos = gcmd.get_float('Y', None)
-        y_adjust = gcmd.get_float('Y_ADJUST', None)
-        z_pos = gcmd.get_float('Z', None)
-        z_adjust = gcmd.get_float('Z_ADJUST', None)
+        runtime = self._require_normal(gcmd)
+        current = Vector3(*self.global_offset)
+        values = []
+        for axis, original in zip('XYZ', (current.x, current.y, current.z)):
+            absolute = gcmd.get_float(axis, None)
+            adjust = gcmd.get_float(axis + '_ADJUST', None)
+            values.append(
+                absolute if absolute is not None
+                else original + (0.0 if adjust is None else adjust)
+            )
+        runtime.profiles.update_global_offset(
+            Vector3(*values), mounted_tool=self._mounted_tool_id()
+        )
+        self._sync_legacy_views()
 
-        if x_pos is not None:
-            self.global_offset[0] = float(x_pos)
-        elif x_adjust is not None:
-            self.global_offset[0] = float(self.global_offset[0]) + float(x_adjust)
-        if y_pos is not None:
-            self.global_offset[1] = float(y_pos)
-        elif y_adjust is not None:
-            self.global_offset[1] = float(self.global_offset[1]) + float(y_adjust)
-        if z_pos is not None:
-            self.global_offset[2] = float(z_pos)
-        elif z_adjust is not None:
-            self.global_offset[2] = float(self.global_offset[2]) + float(z_adjust)
-
-        self.log.trace("Global offset now set to: %f, %f, %f." % (float(self.global_offset[0]), float(self.global_offset[1]), float(self.global_offset[2])))
-        self.save_global_offset()
-
-    cmd_GET_GLOBAL_OFFSET_help = "Get the global tool offset"
     def cmd_GET_GLOBAL_OFFSET(self, gcmd):
-        gcmd.respond_info(f"Offset is: {self.global_offset[0]} {self.global_offset[1]} {self.global_offset[2]}")
+        gcmd.respond_info('Offset is: %g %g %g' % tuple(self.global_offset))
 
-    def save_global_offset(self):
-        save_variables = self.printer.lookup_object('save_variables')
-        save_variables.cmd_SAVE_VARIABLE(self.gcode.create_gcode_command(
-            "SAVE_VARIABLE", "SAVE_VARIABLE", {"VARIABLE": "ktcc_global_offset", 'VALUE': self.global_offset }))
+    # Thermal commands ------------------------------------------------
 
-    def load_global_offset(self):
-        save_variables = self.printer.lookup_object('save_variables')
-        self.global_offset = [p for p in save_variables.allVariables.get('ktcc_global_offset', [0,0,0])]
+    def cmd_SET_TOOL_TEMPERATURE(self, gcmd):
+        runtime = self._require_normal(gcmd)
+        tool_id = self._tool_id(gcmd)
+        standby = gcmd.get_float('STDB_TMP', None, minval=0)
+        active = gcmd.get_float('ACTV_TMP', None, minval=0)
+        state = gcmd.get_int('CHNG_STATE', None, minval=0, maxval=2)
+        idle = gcmd.get_float('STDB_TIMEOUT', None, minval=0.1)
+        off = gcmd.get_float('SHTDWN_TIMEOUT', None, minval=0.1)
+        mode = None if state is None else {
+            0: ThermalMode.OFF,
+            1: ThermalMode.STANDBY,
+            2: ThermalMode.ACTIVE,
+        }[state]
+        snapshot = runtime.thermal.set_tool_temperature(
+            tool_id,
+            active_target=active,
+            standby_target=standby,
+            mode=mode,
+            idle_to_standby_time=idle,
+            standby_to_off_time=off,
+        )
+        if mode is ThermalMode.STANDBY:
+            runtime.thermal.schedule_inactivity(tool_id)
+        self._sync_legacy_views()
+        if all(value is None for value in (standby, active, state, idle, off)):
+            gcmd.respond_info(
+                'T%d Current Temperature Settings\n Active %s %.1f*C'
+                '\n Standby %s %.1f*C'
+                % (tool_id,
+                   '*' if snapshot.mode is ThermalMode.ACTIVE else ' ',
+                   snapshot.active_target,
+                   '*' if snapshot.mode is ThermalMode.STANDBY else ' ',
+                   snapshot.standby_target)
+            )
 
-    cmd_SET_PURGE_ON_TOOLCHANGE_help = "Set the global variable if the tool should be purged or primed with filament at toolchange."
-    def cmd_SET_PURGE_ON_TOOLCHANGE(self, gcmd = None):
-        param = gcmd.get('VALUE', 'FALSE')
+    def cmd_KTCC_TOOL_M109(self, gcmd):
+        runtime = self._require_normal(gcmd)
+        tool_id = self._tool_id(gcmd)
+        runtime.thermal.m109(
+            tool_id,
+            gcmd.get_float('TEMP', minval=0),
+            tolerance=gcmd.get_float('TOLERANCE', None, minval=0),
+        )
+        self._sync_legacy_views()
 
-        if param.upper() == 'FALSE' or param == '0':
-            self.purge_on_toolchange = False
-        else:
-            self.purge_on_toolchange = True
+    def cmd_TEMPERATURE_WAIT_WITH_TOLERANCE(self, gcmd):
+        runtime = self._require_normal(gcmd)
+        tool_id = gcmd.get_int('TOOL', None, minval=0)
+        heater_id = gcmd.get_int('HEATER', None, minval=0)
+        if tool_id is not None and heater_id is not None:
+            raise gcmd.error('TOOL and HEATER are mutually exclusive')
+        runtime.thermal.temperature_wait_with_tolerance(
+            tool_id if tool_id is not None else self._mounted_tool_id(),
+            heater_id=heater_id,
+            tolerance=gcmd.get_float('TOLERANCE', 1.0, minval=0, maxval=50),
+        )
+
+    def cmd_KTCC_SET_ALL_TOOL_HEATERS_OFF(self, gcmd):
+        runtime = self._require_normal(gcmd)
+        self._suspended_heater_modes = {
+            spec.id.value: runtime.thermal.snapshot(spec.id).mode
+            for spec in runtime.bridge.registry
+            if runtime.thermal.snapshot(spec.id).mode is not ThermalMode.OFF
+        }
+        runtime.thermal.off_all()
+        self._sync_legacy_views()
+
+    def cmd_KTCC_RESUME_ALL_TOOL_HEATERS(self, gcmd):
+        runtime = self._require_normal(gcmd)
+        for desired in (ThermalMode.STANDBY, ThermalMode.PREHEAT, ThermalMode.ACTIVE):
+            for tool_id, mode in self._suspended_heater_modes.items():
+                if mode is desired:
+                    runtime.thermal.set_temperature(tool_id, mode=mode)
+        self._sync_legacy_views()
+
+    def cmd_KTCC_PREHEAT_TOOL(self, gcmd):
+        runtime = self._require_normal(gcmd)
+        tool_id = self._tool_id(gcmd)
+        try:
+            target = WaitTarget(gcmd.get('MODE', 'ACTIVE').strip().upper())
+        except ValueError as error:
+            raise gcmd.error(str(error))
+        if target not in (WaitTarget.ACTIVE, WaitTarget.STANDBY):
+            raise gcmd.error('MODE must be ACTIVE or STANDBY')
+        runtime.thermal.preheat(
+            tool_id,
+            target=target,
+            temperature=gcmd.get_float('TEMP', None, minval=0),
+            wait=bool(gcmd.get_int('WAIT', 0, minval=0, maxval=1)),
+            tolerance=gcmd.get_float('TOLERANCE', None, minval=0),
+            timeout=gcmd.get_float('TIMEOUT', None, above=0),
+        )
+        self._sync_legacy_views()
+
+    def cmd_KTCC_CANCEL_PREHEAT(self, gcmd):
+        runtime = self._require_normal(gcmd)
+        runtime.thermal.cancel_preheat(self._tool_id(gcmd))
+        self._sync_legacy_views()
+
+    def cmd_KTCC_WAIT_TOOL(self, gcmd):
+        runtime = self._require_normal(gcmd)
+        try:
+            target = WaitTarget(gcmd.get('TARGET', 'CURRENT').strip().upper())
+            mode = WaitMode(gcmd.get('MODE', 'HEAT').strip().upper())
+        except ValueError as error:
+            raise gcmd.error(str(error))
+        runtime.thermal.wait(
+            self._tool_id(gcmd),
+            target=target,
+            mode=mode,
+            tolerance=gcmd.get_float('TOLERANCE', None, minval=0),
+            timeout=gcmd.get_float('TIMEOUT', None, above=0),
+            stable_time=gcmd.get_float('STABLE_TIME', None, minval=0),
+        )
+
+    def cmd_KTCC_APPLY_TOOL_PROFILE(self, gcmd):
+        runtime = self._require_normal(gcmd)
+        tool_id = self._tool_id(gcmd)
+        if tool_id != self._mounted_tool_id():
+            raise gcmd.error('profile can only be applied to the mounted tool')
+        runtime.profiles.reapply(tool_id)
+        runtime.profiles.apply_offset(tool_id)
+        self._sync_legacy_views()
+
+    # Fan, offsets, and position compatibility ------------------------
+
+    def cmd_SET_AND_SAVE_FAN_SPEED(self, gcmd):
+        runtime = self._require_normal(gcmd)
+        tool_id = gcmd.get_int('P', self._mounted_tool_id(), minval=0)
+        if tool_id is None:
+            raise gcmd.error('missing tool id')
+        speed = gcmd.get_float('S', 1.0, minval=0, maxval=255)
+        speed = speed / 255.0 if speed > 1.0 else speed
+        fan = runtime.bridge.registry[tool_id].fan
+        if fan is not None:
+            self.saved_fan_speed = speed
+            runtime.machine.set_fan(fan, speed)
+
+    def SetAndSaveFanSpeed(self, tool_id, fanspeed):
+        runtime = self._require_normal()
+        fan = runtime.bridge.registry[int(tool_id)].fan
+        if fan is not None:
+            self.saved_fan_speed = float(fanspeed)
+            runtime.machine.set_fan(fan, self.saved_fan_speed)
 
     def SaveFanSpeed(self, fanspeed):
         self.saved_fan_speed = float(fanspeed)
 
-    cmd_SAVE_POSITION_help = "Save the specified G-Code position."
-#  Sets the Restore type and saves specified position.
-#   With no parameters it will set Restore type to 0, no restore.
-#   With X and Y parameters it will save the specified X and Y. Sets restore type to 1, restore XY.
-#   With X, Y and Z parameters it will save the specified X, Y and Z. Sets restore type to 2, restore XYZ.
-#  X= X position to save, optional but Y must be specifie or this will be ignored.
-#  Y= Y position to save, optional but X must be specifie or this will be ignored.
-#  Z= Z position to save, optional but X and Y must be specifie or this will be ignored.
-    def cmd_SAVE_POSITION(self, gcmd):
-        param_X = gcmd.get_float('X', None)
-        param_Y = gcmd.get_float('Y', None)
-        param_Z = gcmd.get_float('Z', None)
-        self.SavePosition(param_X, param_Y, param_Z)
+    def cmd_SET_PURGE_ON_TOOLCHANGE(self, gcmd):
+        value = gcmd.get('VALUE', 'FALSE').upper()
+        self.purge_on_toolchange = value not in ('FALSE', '0')
 
-    def SavePosition(self, param_X = None, param_Y = None, param_Z = None):
+    def cmd_SAVE_POSITION(self, gcmd):
+        self.SavePosition(
+            gcmd.get_float('X', None),
+            gcmd.get_float('Y', None),
+            gcmd.get_float('Z', None),
+        )
+        restore = gcmd.get_int(
+            'RESTORE_POSITION_TYPE', None, minval=0, maxval=2
+        )
+        if restore is not None:
+            self.restore_position_on_toolchange_type = restore
+
+    def SavePosition(self, param_X=None, param_Y=None, param_Z=None):
         if param_X is None or param_Y is None:
             self.restore_position_on_toolchange_type = 0
             return
-        elif param_Z is None:
-            self.restore_position_on_toolchange_type = 1
-        else:
-            self.restore_position_on_toolchange_type = 2
-
+        self.restore_position_on_toolchange_type = 1 if param_Z is None else 2
         self.saved_position = [param_X, param_Y, param_Z]
 
-
-    cmd_SAVE_CURRENT_POSITION_help = "Save the current G-Code position."
-#  Saves current position.
-#  RESTORE_POSITION_TYPE= Type of restore, optional. If not specified, restore_position_on_toolchange_type will not be changed.
-#    0: No restore
-#    1: Restore XY
-#    2: Restore XYZ
     def cmd_SAVE_CURRENT_POSITION(self, gcmd):
-        # Save optional RESTORE_POSITION_TYPE parameter to restore_position_on_toolchange_type variable.
-        param = gcmd.get_int('RESTORE_POSITION_TYPE', None, minval=0, maxval=2)
-        self.SaveCurrentPosition(param)
+        self.SaveCurrentPosition(
+            gcmd.get_int('RESTORE_POSITION_TYPE', None, minval=0, maxval=2)
+        )
 
-    def SaveCurrentPosition(self, restore_position_type = None):
+    def SaveCurrentPosition(self, restore_position_type=None):
         if restore_position_type is not None:
-            if restore_position_type in [ 0, 1, 2 ]:
-                self.restore_position_on_toolchange_type = restore_position_type
+            self.restore_position_on_toolchange_type = restore_position_type
+        status = self.printer.lookup_object('gcode_move').get_status(
+            self.reactor.monotonic()
+        )
+        position = status.get('gcode_position')
+        if not isinstance(position, (list, tuple)) or len(position) < 3:
+            raise self.printer.command_error('gcode_position status is unavailable')
+        self.saved_position = list(position)
 
-        gcode_move = self.printer.lookup_object('gcode_move')
-        self.saved_position = gcode_move._get_gcode_position()
-
-    cmd_RESTORE_POSITION_help = "Restore a previously saved G-Code position if it was specified in the toolchange T# command."
-#  Restores the previously saved possition according to
-#   With no parameters it will Restore to previousley saved type.
-#  RESTORE_POSITION_TYPE= Type of restore, optional. If not specified, previousley saved restore_position_on_toolchange_type will be used.
-#    0: No restore
-#    1: Restore XY
-#    2: Restore XYZ
     def cmd_RESTORE_POSITION(self, gcmd):
-        self.log.trace("cmd_RESTORE_POSITION running: " + str(self.restore_position_on_toolchange_type))
-
-        param = gcmd.get_int('RESTORE_POSITION_TYPE', None, minval=0, maxval=2)
-        feedrate = gcmd.get_int('F', None, minval=0)
-
-        if param is not None:
-            if param == 0 or param == 1 or param == 2:
-                self.restore_position_on_toolchange_type = param
-
+        restore = gcmd.get_int(
+            'RESTORE_POSITION_TYPE', None, minval=0, maxval=2
+        )
+        if restore is not None:
+            self.restore_position_on_toolchange_type = restore
         if self.restore_position_on_toolchange_type == 0:
             return
-
         if self.saved_position is None:
-            raise gcmd.error("No previously saved g-code position.")
+            raise gcmd.error('No previously saved g-code position.')
+        feedrate = gcmd.get_int('F', None, minval=0)
+        if feedrate:
+            self.gcode.run_script_from_command('G0 F%d' % feedrate)
+        self.gcode.run_script_from_command(
+            'G0 X%.3f Y%.3f' % (self.saved_position[0], self.saved_position[1])
+        )
+        if self.restore_position_on_toolchange_type >= 2:
+            self.gcode.run_script_from_command('G0 Z%.3f' % self.saved_position[2])
 
-        try:
-            p = self.saved_position
-            if feedrate:
-                self.gcode.run_script_from_command(
-                    'G0 F%d' % feedrate
-                )
-            if self.restore_position_on_toolchange_type >= 1:
-                self.gcode.run_script_from_command(
-                    'G0 X%.3f Y%.3f' % (p[0], p[1])
-                )
-            if self.restore_position_on_toolchange_type >= 2:
-                self.gcode.run_script_from_command(
-                    'G0 Z%.3f' % (p[2])
-                )
-        except:
-            raise gcmd.error("Could not restore position.")
-
-    def get_status(self, eventtime= None):
-        status = {
-            "global_offset": self.global_offset,
-            "tool_current": self.tool_current,
-            "saved_fan_speed": self.saved_fan_speed,
-            "purge_on_toolchange": self.purge_on_toolchange,
-            "restore_position_on_toolchange_type": self.restore_position_on_toolchange_type,
-            "saved_position": self.saved_position,
-            "last_endstop_query": self.last_endstop_query
-        }
-        return status
-
-    cmd_KTCC_SET_GCODE_OFFSET_FOR_CURRENT_TOOL_help = "Set G-Code offset to the one of current tool."
-#  Sets the G-Code offset to the one of the current tool.
-#   With no parameters it will not move the toolhead.
-#  MOVE= If should move the toolhead, optional. If not specified, it will not move.
-#    0: No move
-#    1: Move
     def cmd_KTCC_SET_GCODE_OFFSET_FOR_CURRENT_TOOL(self, gcmd):
-        current_tool_id = int(self.get_status()['tool_current']) # int(self.toollock.get_tool_current())
-
-        self.log.trace("Setting offsets to those of T" + str(current_tool_id) + ".")
-
-        if current_tool_id <= self.TOOL_UNLOCKED:
-            msg = "KTCC_SET_GCODE_OFFSET_FOR_CURRENT_TOOL: Unknown tool mounted. Can't set offsets."
-            self.log.always(msg)
-            # raise self.printer.command_error(msg)
+        runtime = self._require_runtime(gcmd)
+        tool_id = self._mounted_tool_id()
+        if tool_id is None:
+            raise gcmd.error("A known mounted tool is required to apply offsets")
+        move = gcmd.get_int('MOVE', 0, minval=0, maxval=1)
+        state = runtime.profiles.offset_state(tool_id)
+        if move == 0:
+            runtime.profiles.apply_offset(tool_id)
         else:
-            # If optional MOVE parameter is passed as 0 or 1
-            param_Move = gcmd.get_int('MOVE', 0, minval=0, maxval=1)
-            current_tool = self.printer.lookup_object('tool ' + str(current_tool_id))
-            self.log.trace("SET_GCODE_OFFSET X=%s Y=%s Z=%s MOVE=%s" % (str(current_tool.offset[0]), str(current_tool.offset[1]), str(current_tool.offset[2]), str(param_Move)))
-            self.gcode.run_script_from_command("SET_GCODE_OFFSET X=%s Y=%s Z=%s MOVE=%s" % (str(current_tool.offset[0]), str(current_tool.offset[1]), str(current_tool.offset[2]), str(param_Move)))
+            offset = state.effective
+            self.gcode.run_script_from_command(
+                'SET_GCODE_OFFSET X=%g Y=%g Z=%g MOVE=1'
+                % (offset.x, offset.y, offset.z)
+            )
 
+    # Transaction checkpoints and recovery ----------------------------
 
-###########################################
-# TOOL REMAPING                           #
-###########################################
+    def cmd_KTCC_TRANSITION_CHECKPOINT(self, gcmd):
+        runtime = self._require_runtime(gcmd)
+        runtime.toolchange.checkpoint(
+            gcmd.get('TRANSITION_ID'),
+            gcmd.get('CAPABILITY'),
+            gcmd.get('NAME'),
+            completed=bool(gcmd.get_int('COMPLETED', 1, minval=0, maxval=1)),
+        )
+        self._sync_legacy_views()
 
-    def _set_tool_to_tool(self, from_tool, to_tool):
-        #Check first if to_tool is a valid tool.
-        tools = self.printer.lookup_objects('tool')
-        if not [item for item in tools if item[0] == ("tool " + str(to_tool))]:
-            self.log.always("Tool %s not a valid tool" % str(to_tool))
-            return False
+    def cmd_KTCC_RECOVERY_STATUS(self, gcmd):
+        status = self._require_runtime(gcmd).toolchange.recovery_status()
+        failure = status.state.failure
+        gcmd.respond_info(
+            'KTCC recovery failure_id=%s code=%s operation=%s source=%s '
+            'target=%s phase=%s action=%s checkpoint=%s mounted_estimate=%s '
+            'lock_estimate=%s carriage_estimate=%s ack=%s commands=%s '
+            'actions=%s heaters=%s history=%s'
+            % (failure.failure_id, failure.error_code, failure.operation.value,
+               failure.source_mounted.kind.value, failure.requested_target,
+               failure.phase, failure.action_name,
+               failure.last_completed_checkpoint,
+               failure.mounted_estimate.kind.value,
+               failure.lock_estimate.value,
+               failure.carriage_estimate.value,
+               status.acknowledgment_token,
+               ','.join(status.permitted_commands),
+               ','.join(status.available_actions),
+               ','.join('%s:%g' % item for item in failure.heater_snapshot),
+               ','.join(failure.recovery_action_history))
+        )
 
-        # Set the new tool.
-        self.tool_map[from_tool] = to_tool
-        self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=%s VALUE='%s'" % (self.VARS_KTCC_TOOL_MAP, self.tool_map))
+    def cmd_KTCC_RECOVERY_ABORT(self, gcmd):
+        heaters = gcmd.get('HEATERS', 'OFF').strip().upper()
+        if heaters != 'OFF':
+            raise gcmd.error('this machine policy accepts only HEATERS=OFF')
+        self._require_runtime(gcmd).toolchange.recovery_abort(
+            gcmd.get('FAILURE_ID')
+        )
+        self._sync_legacy_views()
 
-    def _tool_map_to_human_string(self):
-        msg = "Number of tools remaped: " + str(len(self.tool_map))
+    def cmd_KTCC_RECOVERY_RUN(self, gcmd):
+        self._require_runtime(gcmd).toolchange.run_recovery_action(
+            gcmd.get('FAILURE_ID'), gcmd.get('ACTION')
+        )
+        self._sync_legacy_views()
 
-        for from_tool, to_tool in self.tool_map.items():
-            msg += "\nTool %s-> Tool %s" % ( str(from_tool), str(to_tool))
-
-        return msg
-
-    def tool_is_remaped(self, tool_to_check):
-        if tool_to_check in self.tool_map:
-            return self.tool_map[tool_to_check]
+    def cmd_KTCC_RECOVERY_RECONCILE(self, gcmd):
+        runtime = self._require_runtime(gcmd)
+        raw = gcmd.get('MOUNTED').strip().upper()
+        if raw == 'NONE':
+            mounted = MountedState.none()
+        elif raw == 'UNKNOWN':
+            mounted = MountedState.unknown()
+        elif raw.startswith('T') and raw[1:].isdigit():
+            mounted = MountedState.known(int(raw[1:]))
         else:
-            return -1
+            raise gcmd.error('MOUNTED must be NONE, UNKNOWN, or T<id>')
+        try:
+            lock = LockState(gcmd.get('LOCK').strip().upper())
+            carriage = CarriageEstimate(
+                gcmd.get('CARRIAGE', 'UNKNOWN').strip().upper()
+            )
+        except ValueError as error:
+            raise gcmd.error(str(error))
+        runtime.toolchange.reconcile(
+            gcmd.get('FAILURE_ID'),
+            mounted,
+            lock,
+            carriage=carriage,
+            acknowledgment=gcmd.get('ACK'),
+            note=gcmd.get('NOTE', None),
+        )
+        self._sync_legacy_views()
 
-    def _remap_tool(self, tool, gate, available):
-        self._set_tool_to_tool(tool, gate)
-        # self._set_tool_status(gate, available)
+    def cmd_KTCC_RECOVERY_CONFIRM(self, gcmd):
+        self._require_runtime(gcmd).toolchange.confirm_recovery(
+            gcmd.get('FAILURE_ID')
+        )
+        self._sync_legacy_views()
 
-    def _reset_tool_mapping(self):
-        self.log.debug("Resetting Tool map")
-        self.tool_map = {}
-        self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=%s VALUE='%s'" % (self.VARS_KTCC_TOOL_MAP, self.tool_map))
+    # Endstop helper retained as an explicit hardware adapter ----------
 
-### GCODE COMMANDS FOR TOOL REMAP LOGIC ##################################
-
-    cmd_KTCC_DISPLAY_TOOL_MAP_help = "Display the current mapping of tools to other KTCC tools." # Used with endless spool" in the future
-    def cmd_KTCC_DISPLAY_TOOL_MAP(self, gcmd):
-        summary = gcmd.get_int('SUMMARY', 0, minval=0, maxval=1)
-        self.log.always(self._tool_map_to_human_string())
-
-    cmd_KTCC_REMAP_TOOL_help = "Remap a tool to another one."
-    def cmd_KTCC_REMAP_TOOL(self, gcmd):
-        reset = gcmd.get_int('RESET', 0, minval=0, maxval=1)
-        if reset == 1:
-            self._reset_tool_mapping()
-        else:
-            from_tool = gcmd.get_int('TOOL', -1, minval=0)
-            to_tool = gcmd.get_int('SET', minval=0)
-            available = 1 #gcmd.get_int('AVAILABLE', -1, minval=0, maxval=1)  #For future endless spool mode.
-            # if available == -1:
-            #     available = self.tool_status[to_tool]
-            if from_tool != -1:
-                self._remap_tool(from_tool, to_tool, available)
-            # else:
-            #     self._set_tool_status(to_tool, available)
-        self.log.info(self._tool_map_to_human_string())
-
-### GCODE COMMANDS FOR witing on endstop (Jubilee sytle toollock) ##################################
-
-    cmd_KTCC_ENDSTOP_QUERY_help = "Wait for a ENDSTOP= untill it is TRIGGERED=0/[1] or ATEMPTS=#"
     def cmd_KTCC_ENDSTOP_QUERY(self, gcmd):
-        endstop_name = gcmd.get('ENDSTOP') #'manual_stepper tool_lock'
-        should_be_triggered = bool(gcmd.get_int('TRIGGERED', 1, minval=0, maxval=1))
-        atempts = gcmd.get_int('ATEMPTS', -1, minval=1)
-        self.query_endstop(endstop_name, should_be_triggered, atempts)
+        self.query_endstop(
+            gcmd.get('ENDSTOP'),
+            bool(gcmd.get_int('TRIGGERED', 1, minval=0, maxval=1)),
+            gcmd.get_int('ATEMPTS', -1),
+        )
 
     def query_endstop(self, endstop_name, should_be_triggered=True, atempts=-1):
-        # Get endstops
         endstop = None
-        query_endstops = self.printer.lookup_object('query_endstops')
-        for es, name in query_endstops.endstops:
+        for candidate, name in self.printer.lookup_object('query_endstops').endstops:
             if name == endstop_name:
-                endstop = es
+                endstop = candidate
                 break
         if endstop is None:
-            raise Exception("Unknown endstop '%s'" % (endstop_name))
-
-        toolhead = self.printer.lookup_object("toolhead")
+            raise self.printer.command_error("Unknown endstop '%s'" % endstop_name)
+        toolhead = self.printer.lookup_object('toolhead')
         eventtime = self.reactor.monotonic()
-
-        dwell = 0.1
-        if atempts == -1:
-            dwell = 1.0
-
-        i=0
+        dwell = 1.0 if atempts == -1 else 0.1
+        attempts = 0
+        triggered = False
         while not self.printer.is_shutdown():
-            i += 1
-            last_move_time = toolhead.get_last_move_time()
-            is_triggered = bool(endstop.query_endstop(last_move_time))
-            self.log.trace("Check #%d of %s endstop: %s" % (i, endstop_name, ("Triggered" if is_triggered else "Not Triggered")))
-            if is_triggered == should_be_triggered:
+            attempts += 1
+            triggered = bool(endstop.query_endstop(toolhead.get_last_move_time()))
+            if triggered == should_be_triggered:
                 break
-            # If not running continuesly then check for atempts.
-            if atempts > 0 and atempts <= i:
+            if atempts > 0 and attempts >= atempts:
                 break
             eventtime = self.reactor.pause(eventtime + dwell)
-        # if i > 1 or atempts == 1:
-        # self.log.debug("Endstop %s is %s Triggered after #%d checks." % (endstop_name, ("" if is_triggered else "Not"), i))
+        self.last_endstop_query[endstop_name] = triggered
 
-        self.last_endstop_query[endstop_name] = is_triggered
 
 def load_config(config):
     return ToolLock(config)

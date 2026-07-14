@@ -21,7 +21,7 @@ DWELL_TIME = 1.0 # this used to avoid klipper timing issue
 
 Probes = namedtuple('Probes', ['x', 'y', 'z'])
 
-class AlignemntHelper:
+class AlignmentHelper:
     def __init__(self, tool_id: int, probe_point: tuple[float, float], probes: Probes, printer) -> None:
         self.printer = printer
         self.tool_id = tool_id
@@ -68,8 +68,11 @@ class AlignemntHelper:
 
         return (x - self.probe_point[0], y - self.probe_point[1])
 
-    def tranform_to_machine_position(self, user_pos):
+    def transform_to_machine_position(self, user_pos):
         return [p + o for p, o in zip(user_pos, self.tool.offset)]
+
+    # Compatibility for external Python callers of the misspelled old method.
+    tranform_to_machine_position = transform_to_machine_position
 
     def prepare(self):
         self.gcode.respond_info(f'preparing alignment for tool {self.tool_id}: X={self._default_x_offset:.6f} Y={self._default_y_offset:.6f} Z={self._default_z_offset:.6f}')
@@ -90,10 +93,11 @@ class AlignemntHelper:
     def finish(self):
         self.gcode.run_script_from_command(
             'KTCC_TOOL_DROPOFF_ALL\n'
+            'RESTORE_GCODE_STATE NAME=alignment_state MOVE=0\n'
         )
 
     def move_in_user_pos(self, pos, speed, wait=True):
-        transformed_pos = self.tranform_to_machine_position(pos)
+        transformed_pos = self.transform_to_machine_position(pos)
         self.toolhead.manual_move(transformed_pos, speed)
         if wait:
             self.toolhead.wait_moves()
@@ -104,7 +108,7 @@ class AlignemntHelper:
 
         # we should have z sampled already
         z_offset = self.get_z()
-        probe_x, probe_y = self.tranform_to_machine_position([self.probe_point[0], self.probe_point[1]])
+        probe_x, probe_y = self.transform_to_machine_position([self.probe_point[0], self.probe_point[1]])
         probe_z = z_offset - XY_PROBE_DEPTH
         pos = self.toolhead.get_position()
         probe_center = [probe_x, probe_y, probe_z, pos[3]]
@@ -116,7 +120,7 @@ class AlignemntHelper:
             self.toolhead.wait_moves()
 
         # move to first probe point (left)
-        start_pos = self.tranform_to_machine_position([self.probe_point[0] - XY_PROBE_OFFSET, self.probe_point[1]])
+        start_pos = self.transform_to_machine_position([self.probe_point[0] - XY_PROBE_OFFSET, self.probe_point[1]])
         self.toolhead.manual_move(start_pos, FAST_MOVE_SPEED_XY)
         self.toolhead.manual_move([None, None, probe_z], FAST_MOVE_SPEED_Z)
         self.toolhead.wait_moves()
@@ -190,8 +194,10 @@ class AlignemntHelper:
 
     def probe_z(self, n_samples: int = 3):
         # toolhead position is the machine position in RRF
-        probe_tgt = self.tranform_to_machine_position([self.probe_point[0], self.probe_point[1], -DEFAULT_Z_OFFSET - 1.0])
-        logging.info(f'tool {self.tool_id}: probing z from location {probe_tgt}')
+        probe_tgt = self.transform_to_machine_position([self.probe_point[0], self.probe_point[1], -DEFAULT_Z_OFFSET - 1.0])
+        logging.getLogger('ktcc.alignment').info(
+            'tool %s: probing z from location %s', self.tool_id, probe_tgt
+        )
 
         pos = self.toolhead.get_position()
         probe_tgt.append(pos[3]) # probing_move requires 4th axis
@@ -227,6 +233,7 @@ class Alignment:
         self.config = config
         self.printer = config.get_printer()
         self.gcode = self.printer.lookup_object('gcode')
+        self.log = logging.getLogger('ktcc.alignment')
 
         # steppers
         self.steppers = {}
@@ -238,7 +245,7 @@ class Alignment:
         # Create an "endstop" object to handle the probe pin
         ppins = self.printer.lookup_object('pins')
         pin = config.get('pin')
-        logging.info(f'alignment: using pin {pin}')
+        self.log.info('alignment: using pin %s', pin)
         pin_params = ppins.lookup_pin(pin, can_invert=True, can_pullup=True)
         mcu = pin_params['chip']
 
@@ -327,27 +334,27 @@ class Alignment:
         toolhead = self.printer.lookup_object('toolhead')
         curtime = self.printer.get_reactor().monotonic()
         kin = toolhead.get_kinematics()
-        if kin.get_status(curtime)['homed_axes'] != 'xyz':
+        homed = kin.get_status(curtime)['homed_axes'].lower()
+        if not all(axis in homed for axis in 'xyz'):
             raise self.gcode.error("all axes must be homed before align")
 
         self.gcode.respond_info(f'aligning tools {tools_to_probe} at probe point {probe_point} with {n_samples} samples and {n_retries} retries')
 
-        ktcclog = self.printer.lookup_object('ktcclog')
-
         for tool_id in tools_to_probe:
             for t in range(n_retries):
-                ktcclog.info(f'aligning tool {tool_id} for {t+1}/{n_retries}')
+                self.log.info('aligning tool %s for %s/%s', tool_id, t + 1, n_retries)
                 samples = []
                 for i in range(n_samples):
                     self.gcode.respond_info(f'probing tool {tool_id}, sample {i+1}/{n_samples}')
-                    helper = AlignemntHelper(tool_id, probe_point, self.probes, self.printer)
+                    helper = AlignmentHelper(tool_id, probe_point, self.probes, self.printer)
 
                     helper.prepare()
-                    # ktcc log will mesh up the probe results
-                    with self.lower_stepper_current(), ktcclog.disable_save():
-                        helper.probe_z(3)
-                        helper.probe_xy()
-                    helper.finish()
+                    try:
+                        with self.lower_stepper_current():
+                            helper.probe_z(3)
+                            helper.probe_xy()
+                    finally:
+                        helper.finish()
 
                     x, y = helper.get_xy()
                     z = helper.get_z()
@@ -356,13 +363,13 @@ class Alignment:
                     samples.append((x, y, z))
 
                 # calculate average
-                x_avg = sum([s[0] for s in samples]) / len(samples)
-                y_avg = sum([s[1] for s in samples]) / len(samples)
-                z_avg = sum([s[2] for s in samples]) / len(samples)
+                x_avg = sum(s[0] for s in samples) / len(samples)
+                y_avg = sum(s[1] for s in samples) / len(samples)
+                z_avg = sum(s[2] for s in samples) / len(samples)
                 # calculate mean absolute deviation
-                x_mad = sum([abs(s[0] - x_avg) for s in samples]) / len(samples)
-                y_mad = sum([abs(s[1] - y_avg) for s in samples]) / len(samples)
-                z_mad = sum([abs(s[2] - z_avg) for s in samples]) / len(samples)
+                x_mad = sum(abs(s[0] - x_avg) for s in samples) / len(samples)
+                y_mad = sum(abs(s[1] - y_avg) for s in samples) / len(samples)
+                z_mad = sum(abs(s[2] - z_avg) for s in samples) / len(samples)
                 # print out results
                 self.gcode.respond_info(f'tool {tool_id}: x={x_avg:.4f}, y={y_avg:.4f}, z={z_avg:.4f} (x_mad={x_mad:.6f}, y_mad={y_mad:.6f}, z_mad={z_mad:.6f})')
 
@@ -376,7 +383,11 @@ class Alignment:
                 else:
                     self.gcode.respond_info(f'tool {tool_id}: alignment failed, retrying')
             else:
-                self.gcode.error(f'tool {tool_id}: alignment failed')
+                raise gcmd.error(f'tool {tool_id}: alignment failed')
+
+
+# Preserve the import name used by older third-party Python integrations.
+AlignemntHelper = AlignmentHelper
 
 
 def load_config(config):

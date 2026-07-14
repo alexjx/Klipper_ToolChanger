@@ -1,15 +1,20 @@
-# More complex example
+# Four physical tools
 
-This are  example files with macros to get you started.
-* It uses T0 as a physical tool having T1-T8 as virtual tools.
-* T9 and T10 are physical tools without virtual tools.
-* T49 is a physical tool without a heater, fan or extruder. Only has a Z probe.
+This example shows four independently configured physical extruder tools. The
+tools share pickup/dropoff actions and thermal timer defaults through
+`[toolgroup 0]`, while each `[tool N]` owns its resources, dock coordinates,
+offset, retraction, pressure advance and temperature defaults.
 
-The files should be added to your printer.cfg like:
+Add both files to `printer.cfg`:
 
 ```
 [include custom/tools.cfg]
-[include custom/tools.cfg]
+[include custom/tool_macro.cfg]
 ```
 
-This is for use with a Jubilee style printer.
+The motion macros assume a Jubilee-style row of docks on the right side of the
+machine. Treat the coordinates, speeds and lock mechanism as examples; verify
+them for your hardware before moving the printer.
+
+All four tools are physical. Virtual tools, physical-parent inheritance and
+runtime tool remapping are intentionally not part of this framework.

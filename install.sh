@@ -36,7 +36,17 @@ check_preconditions()
 link_extension()
 {
     echo "Linking ${EXTENSION_NAME} to Klippy extras..."
-    ln -sf ${SRCDIR}/*.py ${KLIPPER_PATH}/klippy/extras/
+    # Remove the retired custom logging extension from previous installations.
+    rm -f "${KLIPPER_PATH}/klippy/extras/ktcclog.py"
+    for module in alignment.py tool.py toolgroup.py toollock.py; do
+        ln -sf "${SRCDIR}/${module}" "${KLIPPER_PATH}/klippy/extras/${module}"
+    done
+    package_target="${KLIPPER_PATH}/klippy/extras/ktcc"
+    if [ -e "${package_target}" ] && [ ! -L "${package_target}" ]; then
+        echo "Refusing to replace non-symlink path: ${package_target}"
+        exit 1
+    fi
+    ln -sfn "${SRCDIR}/ktcc" "${package_target}"
 }
 
 # Step 3: restarting Klipper

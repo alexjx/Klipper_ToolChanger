@@ -214,14 +214,18 @@ This command can be used without any additional parameters. Without parameters i
       controls require this state.
     - `CHANGING` - A ToolChanger or alignment transaction that may involve
       mechanical work is active.
-    - `RECOVERY_REQUIRED` - An operation failed after mechanical risk began,
-      or the physical tool identity is unknown. Recovery actions may be
-      invoked from this state.
 
-    A stable `tool_current` of `-2` always results in
-    `RECOVERY_REQUIRED`, never `IDLE`. This state describes ToolChanger
-    transaction activity and its confidence in the existing tool identity; it
-    does not independently verify physical tool attachment.
+    `changer_mode` describes ToolChanger transaction activity and whether a
+    mechanical operation completed successfully. It is independent of
+    `tool_current`: an unknown tool identity (`tool_current == -2`) is valid
+    during synchronization, changing, and idle states, and does not by itself
+    indicate a failed operation.
+
+    Validation failures before mechanical risk are reported as ordinary
+    command errors. A failure after mechanical risk begins explicitly places
+    Klippy in its shutdown state, so clients must use Klippy's system state as
+    the authoritative recovery requirement. `changer_mode` remains `CHANGING`
+    until Klippy restarts and performs startup synchronization again.
   - `saved_fan_speed` - Speed saved at each fanspeedchange to be recovered at Toolchange.
   - `purge_on_toolchange` - For use in macros to enable/disable purge/wipe code globaly.
   - `restore_position_on_toolchange_type` - The type of restore position:

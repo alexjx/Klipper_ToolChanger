@@ -25,12 +25,10 @@ class ToolLock:
     CHANGER_SYNCHRONIZING = "SYNCHRONIZING"
     CHANGER_IDLE = "IDLE"
     CHANGER_CHANGING = "CHANGING"
-    CHANGER_RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
     CHANGER_MODES = frozenset((
         CHANGER_SYNCHRONIZING,
         CHANGER_IDLE,
         CHANGER_CHANGING,
-        CHANGER_RECOVERY_REQUIRED,
     ))
 
     def __init__(self, config):
@@ -56,6 +54,7 @@ class ToolLock:
         self._changer_operation = None
         self._changer_risk_started = False
         self._changer_failed = False
+        self._changer_failure = None
 
         self.tool_map = {}
         self.last_endstop_query = {}
@@ -111,13 +110,16 @@ class ToolLock:
             self._changer_operation = operation
             self._changer_risk_started = False
             self._changer_failed = False
+            self._changer_failure = None
             self._set_changer_mode(visible_mode)
 
         self._changer_depth += 1
         try:
             yield
-        except BaseException:
+        except BaseException as error:
             self._changer_failed = True
+            if self._changer_failure is None:
+                self._changer_failure = error
             raise
         finally:
             self._changer_depth -= 1
@@ -125,11 +127,18 @@ class ToolLock:
                 try:
                     if self._changer_failed:
                         if self._changer_risk_started:
-                            final_mode = self.CHANGER_RECOVERY_REQUIRED
+                            failure = self._changer_failure
+                            self.printer.invoke_shutdown(
+                                "ToolChanger operation '%s' failed after "
+                                "mechanical risk began: %s"
+                                % (self._changer_operation, failure))
+                            # Klippy's shutdown state is authoritative. Keep
+                            # the active visible mode until the process
+                            # restarts instead of briefly publishing a
+                            # misleading stable state.
+                            final_mode = self.changer_mode
                         else:
                             final_mode = self._changer_previous_mode
-                    elif str(self.tool_current) == str(self.TOOL_UNKNOWN):
-                        final_mode = self.CHANGER_RECOVERY_REQUIRED
                     else:
                         final_mode = self.CHANGER_IDLE
                     self._set_changer_mode(final_mode)
@@ -137,6 +146,7 @@ class ToolLock:
                     self._changer_operation = None
                     self._changer_risk_started = False
                     self._changer_failed = False
+                    self._changer_failure = None
 
     def mark_changer_risk(self):
         if self._changer_depth == 0:

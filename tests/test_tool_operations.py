@@ -30,6 +30,7 @@ class FakePrinter:
     def __init__(self, homed=True, parent=None):
         self.homed = homed
         self.parent = parent
+        self.shutdowns = []
 
     def command_error(self, message):
         return self.CommandError(message)
@@ -43,6 +44,9 @@ class FakePrinter:
 
     def wait_moves(self):
         pass
+
+    def invoke_shutdown(self, message):
+        self.shutdowns.append(message)
 
 
 class FakeTemplate:
@@ -62,6 +66,7 @@ class FakeTemplate:
 
 def make_toollock(tool_current="-1", mode=ToolLock.CHANGER_IDLE):
     toollock = ToolLock.__new__(ToolLock)
+    toollock.printer = FakePrinter()
     toollock.log = FakeLog()
     toollock.tool_current = str(tool_current)
     toollock.changer_mode = mode
@@ -70,6 +75,7 @@ def make_toollock(tool_current="-1", mode=ToolLock.CHANGER_IDLE):
     toollock._changer_operation = None
     toollock._changer_risk_started = False
     toollock._changer_failed = False
+    toollock._changer_failure = None
     return toollock
 
 
@@ -151,17 +157,16 @@ class ToolOperationTests(unittest.TestCase):
         self.assertEqual("1", toollock.tool_current)
         self.assertEqual(ToolLock.CHANGER_IDLE, toollock.changer_mode)
 
-    def test_select_unknown_tool_rejection_preserves_recovery(self):
+    def test_select_unknown_tool_rejection_preserves_idle(self):
         toollock = make_toollock(
             tool_current=ToolLock.TOOL_UNKNOWN,
-            mode=ToolLock.CHANGER_RECOVERY_REQUIRED)
+            mode=ToolLock.CHANGER_IDLE)
         tool = make_tool(toollock)
 
         with self.assertRaises(FakePrinter.CommandError):
             tool.select_tool_actual()
 
-        self.assertEqual(
-            ToolLock.CHANGER_RECOVERY_REQUIRED, toollock.changer_mode)
+        self.assertEqual(ToolLock.CHANGER_IDLE, toollock.changer_mode)
         self.assertEqual(0, toollock._changer_depth)
 
     def test_pickup_unhomed_rejects_before_tracking_or_risk(self):
@@ -197,7 +202,7 @@ class ToolOperationTests(unittest.TestCase):
         self.assertEqual("1", toollock.tool_current)
         self.assertEqual(ToolLock.CHANGER_IDLE, toollock.changer_mode)
 
-    def test_dropoff_template_failure_requires_recovery(self):
+    def test_dropoff_template_failure_shuts_down_klippy(self):
         toollock = make_toollock(tool_current="1")
         failure = RuntimeError("dropoff failed")
         tool = make_tool(toollock, template_failure=failure)
@@ -206,8 +211,8 @@ class ToolOperationTests(unittest.TestCase):
             tool.Dropoff()
 
         self.assertEqual("1", toollock.tool_current)
-        self.assertEqual(
-            ToolLock.CHANGER_RECOVERY_REQUIRED, toollock.changer_mode)
+        self.assertEqual(ToolLock.CHANGER_CHANGING, toollock.changer_mode)
+        self.assertEqual(1, len(toollock.printer.shutdowns))
 
     def test_virtual_operations_are_nested_safe(self):
         toollock = make_toollock(tool_current="0")

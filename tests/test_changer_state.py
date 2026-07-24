@@ -28,6 +28,7 @@ class FakeTemplate:
 
 def make_toollock(tool_current="-1", mode=None):
     toollock = ToolLock.__new__(ToolLock)
+    toollock.printer = mock.Mock()
     toollock.log = FakeLog()
     toollock.tool_current = str(tool_current)
     toollock.changer_mode = (
@@ -37,6 +38,7 @@ def make_toollock(tool_current="-1", mode=None):
     toollock._changer_operation = None
     toollock._changer_risk_started = False
     toollock._changer_failed = False
+    toollock._changer_failure = None
     return toollock
 
 
@@ -111,32 +113,31 @@ class ChangerStateTests(unittest.TestCase):
     def test_pre_risk_failure_restores_entry_mode(self):
         for entry_mode in (
                 ToolLock.CHANGER_IDLE,
-                ToolLock.CHANGER_RECOVERY_REQUIRED):
+                ToolLock.CHANGER_SYNCHRONIZING):
             toollock = make_toollock(mode=entry_mode)
             with self.assertRaises(ValueError):
                 with toollock.changer_operation("select"):
                     raise ValueError("validation")
             self.assertEqual(entry_mode, toollock.changer_mode)
 
-    def test_post_risk_failure_requires_recovery(self):
+    def test_post_risk_failure_shuts_down_klippy(self):
         toollock = make_toollock(mode=ToolLock.CHANGER_IDLE)
         with self.assertRaises(RuntimeError):
             with toollock.changer_operation("pickup"):
                 toollock.mark_changer_risk()
                 raise RuntimeError("template failed")
-        self.assertEqual(
-            ToolLock.CHANGER_RECOVERY_REQUIRED, toollock.changer_mode)
+        self.assertEqual(ToolLock.CHANGER_CHANGING, toollock.changer_mode)
+        toollock.printer.invoke_shutdown.assert_called_once()
 
-    def test_unknown_tool_on_success_requires_recovery(self):
+    def test_unknown_tool_on_success_ends_idle(self):
         toollock = make_toollock(
             tool_current=ToolLock.TOOL_UNKNOWN,
             mode=ToolLock.CHANGER_IDLE)
         with toollock.changer_operation("lock"):
             pass
-        self.assertEqual(
-            ToolLock.CHANGER_RECOVERY_REQUIRED, toollock.changer_mode)
+        self.assertEqual(ToolLock.CHANGER_IDLE, toollock.changer_mode)
 
-    def test_successful_standalone_lock_requires_recovery(self):
+    def test_successful_standalone_lock_ends_idle_with_unknown_tool(self):
         toollock = make_toollock(
             tool_current=ToolLock.TOOL_UNLOCKED,
             mode=ToolLock.CHANGER_IDLE)
@@ -147,10 +148,9 @@ class ChangerStateTests(unittest.TestCase):
         toollock.ToolLock()
 
         self.assertEqual(str(ToolLock.TOOL_UNKNOWN), toollock.tool_current)
-        self.assertEqual(
-            ToolLock.CHANGER_RECOVERY_REQUIRED, toollock.changer_mode)
+        self.assertEqual(ToolLock.CHANGER_IDLE, toollock.changer_mode)
 
-    def test_failed_lock_after_risk_requires_recovery(self):
+    def test_failed_lock_after_risk_shuts_down_klippy(self):
         toollock = make_toollock(
             tool_current=ToolLock.TOOL_UNLOCKED,
             mode=ToolLock.CHANGER_IDLE)
@@ -163,35 +163,32 @@ class ChangerStateTests(unittest.TestCase):
             toollock.ToolLock()
 
         self.assertEqual(str(ToolLock.TOOL_UNLOCKED), toollock.tool_current)
-        self.assertEqual(
-            ToolLock.CHANGER_RECOVERY_REQUIRED, toollock.changer_mode)
+        self.assertEqual(ToolLock.CHANGER_CHANGING, toollock.changer_mode)
+        toollock.printer.invoke_shutdown.assert_called_once()
 
-    def test_noop_lock_does_not_clear_recovery(self):
+    def test_noop_lock_preserves_idle_without_running_template(self):
         toollock = make_toollock(
             tool_current="3",
-            mode=ToolLock.CHANGER_RECOVERY_REQUIRED)
+            mode=ToolLock.CHANGER_IDLE)
         toollock.tool_lock_gcode_template = FakeTemplate()
 
         toollock.ToolLock()
 
         self.assertEqual("3", toollock.tool_current)
-        self.assertEqual(
-            ToolLock.CHANGER_RECOVERY_REQUIRED, toollock.changer_mode)
+        self.assertEqual(ToolLock.CHANGER_IDLE, toollock.changer_mode)
         self.assertEqual(0, toollock.tool_lock_gcode_template.calls)
 
-    def test_drop_all_unknown_rejection_preserves_recovery(self):
+    def test_drop_all_unknown_rejection_preserves_idle(self):
         toollock = make_toollock(
             tool_current=ToolLock.TOOL_UNKNOWN,
-            mode=ToolLock.CHANGER_RECOVERY_REQUIRED)
-        toollock.printer = mock.Mock()
+            mode=ToolLock.CHANGER_IDLE)
         error = RuntimeError("unknown tool")
         toollock.printer.command_error.return_value = error
 
         with self.assertRaisesRegex(RuntimeError, "unknown tool"):
             toollock.cmd_KTCC_TOOL_DROPOFF_ALL()
 
-        self.assertEqual(
-            ToolLock.CHANGER_RECOVERY_REQUIRED, toollock.changer_mode)
+        self.assertEqual(ToolLock.CHANGER_IDLE, toollock.changer_mode)
         toollock.printer.lookup_object.assert_not_called()
 
     def test_marking_risk_outside_transaction_is_error(self):
@@ -199,7 +196,7 @@ class ChangerStateTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             toollock.mark_changer_risk()
 
-    def test_caught_nested_failure_still_fails_outer_transaction(self):
+    def test_caught_nested_post_risk_failure_still_shuts_down(self):
         toollock = make_toollock(mode=ToolLock.CHANGER_IDLE)
         with toollock.changer_operation("select"):
             try:
@@ -208,13 +205,13 @@ class ChangerStateTests(unittest.TestCase):
                     raise RuntimeError("caught")
             except RuntimeError:
                 pass
-        self.assertEqual(
-            ToolLock.CHANGER_RECOVERY_REQUIRED, toollock.changer_mode)
+        self.assertEqual(ToolLock.CHANGER_CHANGING, toollock.changer_mode)
+        toollock.printer.invoke_shutdown.assert_called_once()
 
-    def test_successful_unlock_recovers_to_idle(self):
+    def test_successful_unlock_ends_idle(self):
         toollock = make_toollock(
             tool_current=ToolLock.TOOL_UNKNOWN,
-            mode=ToolLock.CHANGER_RECOVERY_REQUIRED)
+            mode=ToolLock.CHANGER_IDLE)
         toollock.tool_unlock_gcode_template = FakeTemplate()
         toollock.SaveCurrentTool = lambda tool: setattr(
             toollock, "tool_current", str(tool))
@@ -224,10 +221,10 @@ class ChangerStateTests(unittest.TestCase):
         self.assertEqual(str(ToolLock.TOOL_UNLOCKED), toollock.tool_current)
         self.assertEqual(ToolLock.CHANGER_IDLE, toollock.changer_mode)
 
-    def test_failed_unlock_after_risk_remains_in_recovery(self):
+    def test_failed_unlock_after_risk_shuts_down_klippy(self):
         toollock = make_toollock(
             tool_current=ToolLock.TOOL_UNKNOWN,
-            mode=ToolLock.CHANGER_RECOVERY_REQUIRED)
+            mode=ToolLock.CHANGER_IDLE)
         failure = RuntimeError("unlock failed")
         toollock.tool_unlock_gcode_template = FakeTemplate(
             lambda: (_ for _ in ()).throw(failure))
@@ -238,11 +235,11 @@ class ChangerStateTests(unittest.TestCase):
             toollock.cmd_TOOL_UNLOCK()
 
         self.assertEqual(str(ToolLock.TOOL_UNKNOWN), toollock.tool_current)
-        self.assertEqual(
-            ToolLock.CHANGER_RECOVERY_REQUIRED, toollock.changer_mode)
+        self.assertEqual(ToolLock.CHANGER_CHANGING, toollock.changer_mode)
+        toollock.printer.invoke_shutdown.assert_called_once()
 
-    def test_bootstrap_known_or_unmounted_tool_ends_idle(self):
-        for tool_current in ("-1", "3"):
+    def test_bootstrap_any_resolved_or_unknown_tool_ends_idle(self):
+        for tool_current in ("-2", "-1", "3"):
             toollock = make_toollock(tool_current=ToolLock.TOOL_UNKNOWN)
             toollock.tool_map = {}
             toollock.load_tool_offsets = lambda: None
@@ -256,24 +253,22 @@ class ChangerStateTests(unittest.TestCase):
 
             self.assertEqual(ToolLock.CHANGER_IDLE, toollock.changer_mode)
 
-    def test_bootstrap_exception_or_unknown_tool_requires_recovery(self):
-        for initialize in (
-                lambda toollock: None,
-                lambda toollock: (_ for _ in ()).throw(
-                    RuntimeError("bootstrap failed"))):
-            toollock = make_toollock(tool_current=ToolLock.TOOL_UNKNOWN)
-            toollock.tool_map = {}
-            toollock.load_tool_offsets = lambda: None
-            toollock.load_global_offset = lambda: None
-            toollock.load_tool_retractions = lambda: None
-            toollock.load_tool_pressure_advance = lambda: None
-            toollock.Initialize_Tool_Lock = lambda: initialize(toollock)
+    def test_bootstrap_exception_shuts_down_klippy(self):
+        toollock = make_toollock(tool_current=ToolLock.TOOL_UNKNOWN)
+        toollock.tool_map = {}
+        toollock.load_tool_offsets = lambda: None
+        toollock.load_global_offset = lambda: None
+        toollock.load_tool_retractions = lambda: None
+        toollock.load_tool_pressure_advance = lambda: None
+        toollock.Initialize_Tool_Lock = lambda: (
+            _ for _ in ()).throw(RuntimeError("bootstrap failed"))
 
-            toollock._bootup_tasks(0)
+        toollock._bootup_tasks(0)
 
-            self.assertEqual(
-                ToolLock.CHANGER_RECOVERY_REQUIRED,
-                toollock.changer_mode)
+        self.assertEqual(
+            ToolLock.CHANGER_SYNCHRONIZING,
+            toollock.changer_mode)
+        toollock.printer.invoke_shutdown.assert_called_once()
 
 
 if __name__ == "__main__":

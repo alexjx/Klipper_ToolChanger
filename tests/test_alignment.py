@@ -87,12 +87,16 @@ class FakeKtcclog:
 class FakePrinter:
     def __init__(self, objects):
         self.objects = objects
+        self.shutdowns = []
 
     def lookup_object(self, name, default=None):
         return self.objects.get(name, default)
 
     def get_reactor(self):
         return mock.Mock(monotonic=lambda: 0.0)
+
+    def invoke_shutdown(self, message):
+        self.shutdowns.append(message)
 
 
 class FakeLog:
@@ -110,6 +114,7 @@ def make_toollock():
     toollock._changer_operation = None
     toollock._changer_risk_started = False
     toollock._changer_failed = False
+    toollock._changer_failure = None
     return toollock
 
 
@@ -122,6 +127,7 @@ def make_alignment(helper_mode):
         'ktcclog': FakeKtcclog(),
         'toollock': toollock,
     })
+    toollock.printer = printer
     instance = alignment.Alignment.__new__(alignment.Alignment)
     instance.printer = printer
     instance.gcode = gcode
@@ -181,17 +187,17 @@ class AlignmentTransactionTests(unittest.TestCase):
         self.assertEqual(ToolLock.CHANGER_IDLE, toollock.changer_mode)
         self.assertEqual(0, toollock._changer_depth)
 
-    def test_motion_failure_after_risk_requires_recovery(self):
+    def test_motion_failure_after_risk_shuts_down_klippy(self):
         instance, _, toollock, helper = make_alignment('probe_failure')
         gcmd = FakeGcmd({'TOOLS': '0', 'PROBE_POINT': '0,0', 'SAMPLES': '1'})
         with mock.patch.object(alignment, 'AlignemntHelper', helper):
             with self.assertRaisesRegex(RuntimeError, 'probe failed'):
                 instance.cmd_KTCC_ALIGN_TOOLS(gcmd)
-        self.assertEqual(
-            ToolLock.CHANGER_RECOVERY_REQUIRED, toollock.changer_mode)
+        self.assertEqual(ToolLock.CHANGER_CHANGING, toollock.changer_mode)
+        self.assertEqual(1, len(toollock.printer.shutdowns))
         self.assertEqual(0, toollock._changer_depth)
 
-    def test_retry_exhaustion_raises_command_error_and_requires_recovery(self):
+    def test_retry_exhaustion_raises_and_shuts_down_klippy(self):
         instance, _, toollock, helper = make_alignment('retry_exhaustion')
         gcmd = FakeGcmd({
             'TOOLS': '0',
@@ -202,8 +208,8 @@ class AlignmentTransactionTests(unittest.TestCase):
         with mock.patch.object(alignment, 'AlignemntHelper', helper):
             with self.assertRaisesRegex(CommandError, 'tool 0: alignment failed'):
                 instance.cmd_KTCC_ALIGN_TOOLS(gcmd)
-        self.assertEqual(
-            ToolLock.CHANGER_RECOVERY_REQUIRED, toollock.changer_mode)
+        self.assertEqual(ToolLock.CHANGER_CHANGING, toollock.changer_mode)
+        self.assertEqual(1, len(toollock.printer.shutdowns))
         self.assertEqual(0, toollock._changer_depth)
 
 

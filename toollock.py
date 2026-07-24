@@ -14,11 +14,24 @@
 # ToolLock: Toollock is engaged.
 # ToolUnLock: Toollock is disengaged.
 
+from contextlib import contextmanager
+
+
 class ToolLock:
     TOOL_UNKNOWN = -2
     TOOL_UNLOCKED = -1
     BOOT_DELAY = 1.5            # Delay before running bootup tasks
     VARS_KTCC_TOOL_MAP = "ktcc_state_tool_remap"
+    CHANGER_SYNCHRONIZING = "SYNCHRONIZING"
+    CHANGER_IDLE = "IDLE"
+    CHANGER_CHANGING = "CHANGING"
+    CHANGER_RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
+    CHANGER_MODES = frozenset((
+        CHANGER_SYNCHRONIZING,
+        CHANGER_IDLE,
+        CHANGER_CHANGING,
+        CHANGER_RECOVERY_REQUIRED,
+    ))
 
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -36,6 +49,13 @@ class ToolLock:
         self.saved_position = None
         self.restore_position_on_toolchange_type = 0   # 0: Don't restore; 1: Restore XY; 2: Restore XYZ
         self.log = self.printer.load_object(config, 'ktcclog')
+
+        self.changer_mode = self.CHANGER_SYNCHRONIZING
+        self._changer_depth = 0
+        self._changer_previous_mode = self.CHANGER_SYNCHRONIZING
+        self._changer_operation = None
+        self._changer_risk_started = False
+        self._changer_failed = False
 
         self.tool_map = {}
         self.last_endstop_query = {}
@@ -67,6 +87,63 @@ class ToolLock:
 
         self.printer.register_event_handler("klippy:ready", self.handle_ready)
 
+    def _set_changer_mode(self, new_mode):
+        if new_mode not in self.CHANGER_MODES:
+            raise ValueError("Invalid ToolChanger mode: %s" % (new_mode,))
+        if new_mode == self.changer_mode:
+            return
+        previous_mode = self.changer_mode
+        self.changer_mode = new_mode
+        self.log.info(
+            "ToolChanger mode: %s -> %s" % (previous_mode, new_mode))
+
+    @contextmanager
+    def changer_operation(self, operation, visible_mode=None):
+        if visible_mode is None:
+            visible_mode = self.CHANGER_CHANGING
+        if visible_mode not in self.CHANGER_MODES:
+            raise ValueError(
+                "Invalid ToolChanger mode: %s" % (visible_mode,))
+
+        is_outer = self._changer_depth == 0
+        if is_outer:
+            self._changer_previous_mode = self.changer_mode
+            self._changer_operation = operation
+            self._changer_risk_started = False
+            self._changer_failed = False
+            self._set_changer_mode(visible_mode)
+
+        self._changer_depth += 1
+        try:
+            yield
+        except BaseException:
+            self._changer_failed = True
+            raise
+        finally:
+            self._changer_depth -= 1
+            if is_outer:
+                try:
+                    if self._changer_failed:
+                        if self._changer_risk_started:
+                            final_mode = self.CHANGER_RECOVERY_REQUIRED
+                        else:
+                            final_mode = self._changer_previous_mode
+                    elif str(self.tool_current) == str(self.TOOL_UNKNOWN):
+                        final_mode = self.CHANGER_RECOVERY_REQUIRED
+                    else:
+                        final_mode = self.CHANGER_IDLE
+                    self._set_changer_mode(final_mode)
+                finally:
+                    self._changer_operation = None
+                    self._changer_risk_started = False
+                    self._changer_failed = False
+
+    def mark_changer_risk(self):
+        if self._changer_depth == 0:
+            raise RuntimeError(
+                "ToolChanger mechanical risk marked outside an operation")
+        self._changer_risk_started = True
+
     def handle_ready(self):
         # Load persistent Tool remaping.
         self.tool_map = self.printer.lookup_object('save_variables').allVariables.get(self.VARS_KTCC_TOOL_MAP, {})
@@ -93,7 +170,13 @@ class ToolLock:
         try:
             if len(self.tool_map) > 0:
                 self.log.always(self._tool_map_to_human_string())
-            self.Initialize_Tool_Lock()
+            with self.changer_operation(
+                    "bootstrap",
+                    visible_mode=self.CHANGER_SYNCHRONIZING):
+                # A failed startup reconciliation leaves the physical identity
+                # uncertain even when the failure precedes a nested template.
+                self.mark_changer_risk()
+                self.Initialize_Tool_Lock()
         except Exception as e:
             self.log.always('Warning: Error booting up KTCC: %s' % str(e))
 
@@ -342,8 +425,13 @@ class ToolLock:
     def ToolLock(self, ignore_locked = False):
         self.log.trace("TOOL_LOCK running. ")
         if not ignore_locked and int(self.tool_current) != -1:
-            self.log.always("TOOL_LOCK is already locked with tool " + self.tool_current + ".")
-        else:
+            self.log.always(
+                "TOOL_LOCK is already locked with tool "
+                + str(self.tool_current) + ".")
+            return
+
+        with self.changer_operation("lock"):
+            self.mark_changer_risk()
             self.tool_lock_gcode_template.run_gcode_from_command()
             self.SaveCurrentTool("-2")
             self.log.trace("Tool Locked")
@@ -353,38 +441,42 @@ class ToolLock:
     cmd_KTCC_TOOL_DROPOFF_ALL_help = "Deselect all tools"
     def cmd_KTCC_TOOL_DROPOFF_ALL(self, gcmd = None):
         self.log.trace("KTCC_TOOL_DROPOFF_ALL running. ")# + gcmd.get_raw_command_parameters())
-        if self.tool_current == "-2":
+        if str(self.tool_current) == str(self.TOOL_UNKNOWN):
             raise self.printer.command_error("cmd_KTCC_TOOL_DROPOFF_ALL: Unknown tool already mounted Can't park unknown tool.")
-        if self.tool_current != "-1":
-            self.printer.lookup_object('tool ' + str(self.tool_current)).Dropoff( force_virtual_unload = True )
+        with self.changer_operation("drop_all"):
+            if str(self.tool_current) != str(self.TOOL_UNLOCKED):
+                self.printer.lookup_object(
+                    'tool ' + str(self.tool_current)).Dropoff(
+                        force_virtual_unload=True)
 
+            try:
+                # Need to check all tools at least once but reload them after each time.
+                all_checked_once = False
+                while not all_checked_once:
+                    all_tools = dict(self.printer.lookup_objects('tool'))
+                    all_checked_once =True # If no breaks in next For loop then we can exit the While loop.
+                    for tool_name, tool in all_tools.items():
+                        # If there is a virtual tool loaded:
+                        if tool.get_status()["virtual_loaded"] > self.TOOL_UNLOCKED:
+                            # Pickup and then unload and drop the tool.
+                            self.log.trace("cmd_KTCC_TOOL_DROPOFF_ALL: Picking up and dropping forced: %s." % str(tool.get_status()["virtual_loaded"]))
+                            self.printer.lookup_object("tool " + str(tool.get_status()["virtual_loaded"])).select_tool_actual()
+                            self.printer.lookup_object("tool " + str(tool.get_status()["virtual_loaded"])).Dropoff( force_virtual_unload = True )
+                            all_checked_once =False # Do not exit while loop.
+                            break # Break for loop to start again.
 
-        try:
-            # Need to check all tools at least once but reload them after each time.
-            all_checked_once = False
-            while not all_checked_once:
-                all_tools = dict(self.printer.lookup_objects('tool'))
-                all_checked_once =True # If no breaks in next For loop then we can exit the While loop.
-                for tool_name, tool in all_tools.items():
-                    # If there is a virtual tool loaded:
-                    if tool.get_status()["virtual_loaded"] > self.TOOL_UNLOCKED:
-                        # Pickup and then unload and drop the tool.
-                        self.log.trace("cmd_KTCC_TOOL_DROPOFF_ALL: Picking up and dropping forced: %s." % str(tool.get_status()["virtual_loaded"]))
-                        self.printer.lookup_object("tool " + str(tool.get_status()["virtual_loaded"])).select_tool_actual()
-                        self.printer.lookup_object("tool " + str(tool.get_status()["virtual_loaded"])).Dropoff( force_virtual_unload = True )
-                        all_checked_once =False # Do not exit while loop.
-                        break # Break for loop to start again.
-
-        except Exception as e:
-            raise Exception('cmd_KTCC_TOOL_DROPOFF_ALL: Error: %s' % str(e))
+            except Exception as e:
+                raise Exception('cmd_KTCC_TOOL_DROPOFF_ALL: Error: %s' % str(e))
 
     cmd_TOOL_UNLOCK_help = "Unlock the ToolLock."
     def cmd_TOOL_UNLOCK(self, gcmd = None):
         self.log.trace("TOOL_UNLOCK running. ")
-        self.tool_unlock_gcode_template.run_gcode_from_command()
-        self.SaveCurrentTool(-1)
-        self.log.trace("ToolLock Unlocked.")
-        self.log.increase_statistics('total_toolunlocks')
+        with self.changer_operation("unlock"):
+            self.mark_changer_risk()
+            self.tool_unlock_gcode_template.run_gcode_from_command()
+            self.SaveCurrentTool(-1)
+            self.log.trace("ToolLock Unlocked.")
+            self.log.increase_statistics('total_toolunlocks')
 
 
     def PrinterIsHomedForToolchange(self, lazy_home_when_parking =0):
@@ -811,6 +903,7 @@ class ToolLock:
         status = {
             "global_offset": self.global_offset,
             "tool_current": self.tool_current,
+            "changer_mode": self.changer_mode,
             "saved_fan_speed": self.saved_fan_speed,
             "purge_on_toolchange": self.purge_on_toolchange,
             "restore_position_on_toolchange_type": self.restore_position_on_toolchange_type,

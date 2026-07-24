@@ -1,4 +1,5 @@
 import logging
+import math
 import re
 
 from contextlib import contextmanager
@@ -330,53 +331,76 @@ class Alignment:
         if kin.get_status(curtime)['homed_axes'] != 'xyz':
             raise self.gcode.error("all axes must be homed before align")
 
+        # Resolve and validate every requested tool before entering the
+        # mechanical transaction.  A malformed tool configuration is a
+        # command validation failure, not an indication that the printer's
+        # physical state became uncertain.
+        for tool_id in tools_to_probe:
+            tool = self.printer.lookup_object(f'tool {tool_id}', None)
+            if tool is None:
+                raise gcmd.error(f'No tool with id {tool_id} found')
+            try:
+                offsets = [float(value) for value in tool.config_offset]
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                raise gcmd.error(
+                    f'tool {tool_id} has invalid alignment config offsets')
+            if len(offsets) < 3 or not all(math.isfinite(value)
+                                           for value in offsets[:3]):
+                raise gcmd.error(
+                    f'tool {tool_id} has invalid alignment config offsets')
+
         self.gcode.respond_info(f'aligning tools {tools_to_probe} at probe point {probe_point} with {n_samples} samples and {n_retries} retries')
 
         ktcclog = self.printer.lookup_object('ktcclog')
 
-        for tool_id in tools_to_probe:
-            for t in range(n_retries):
-                ktcclog.info(f'aligning tool {tool_id} for {t+1}/{n_retries}')
-                samples = []
-                for i in range(n_samples):
-                    self.gcode.respond_info(f'probing tool {tool_id}, sample {i+1}/{n_samples}')
-                    helper = AlignemntHelper(tool_id, probe_point, self.probes, self.printer)
+        # Keep one visible transaction across every tool, retry, and sample;
+        # nested ToolChanger operations must not publish intermediate IDLE.
+        toollock = self.printer.lookup_object('toollock')
+        with toollock.changer_operation("alignment"):
+            toollock.mark_changer_risk()
+            for tool_id in tools_to_probe:
+                for t in range(n_retries):
+                    ktcclog.info(f'aligning tool {tool_id} for {t+1}/{n_retries}')
+                    samples = []
+                    for i in range(n_samples):
+                        self.gcode.respond_info(f'probing tool {tool_id}, sample {i+1}/{n_samples}')
+                        helper = AlignemntHelper(tool_id, probe_point, self.probes, self.printer)
 
-                    helper.prepare()
-                    # ktcc log will mesh up the probe results
-                    with self.lower_stepper_current(), ktcclog.disable_save():
-                        helper.probe_z(3)
-                        helper.probe_xy()
-                    helper.finish()
+                        helper.prepare()
+                        # ktcc log will mesh up the probe results
+                        with self.lower_stepper_current(), ktcclog.disable_save():
+                            helper.probe_z(3)
+                            helper.probe_xy()
+                        helper.finish()
 
-                    x, y = helper.get_xy()
-                    z = helper.get_z()
+                        x, y = helper.get_xy()
+                        z = helper.get_z()
 
-                    self.gcode.respond_info(f'tool {tool_id}: sample {i+1}/{n_samples}: x={x:.4f}, y={y:.4f}, z={z:.4f}')
-                    samples.append((x, y, z))
+                        self.gcode.respond_info(f'tool {tool_id}: sample {i+1}/{n_samples}: x={x:.4f}, y={y:.4f}, z={z:.4f}')
+                        samples.append((x, y, z))
 
-                # calculate average
-                x_avg = sum([s[0] for s in samples]) / len(samples)
-                y_avg = sum([s[1] for s in samples]) / len(samples)
-                z_avg = sum([s[2] for s in samples]) / len(samples)
-                # calculate mean absolute deviation
-                x_mad = sum([abs(s[0] - x_avg) for s in samples]) / len(samples)
-                y_mad = sum([abs(s[1] - y_avg) for s in samples]) / len(samples)
-                z_mad = sum([abs(s[2] - z_avg) for s in samples]) / len(samples)
-                # print out results
-                self.gcode.respond_info(f'tool {tool_id}: x={x_avg:.4f}, y={y_avg:.4f}, z={z_avg:.4f} (x_mad={x_mad:.6f}, y_mad={y_mad:.6f}, z_mad={z_mad:.6f})')
+                    # calculate average
+                    x_avg = sum([s[0] for s in samples]) / len(samples)
+                    y_avg = sum([s[1] for s in samples]) / len(samples)
+                    z_avg = sum([s[2] for s in samples]) / len(samples)
+                    # calculate mean absolute deviation
+                    x_mad = sum([abs(s[0] - x_avg) for s in samples]) / len(samples)
+                    y_mad = sum([abs(s[1] - y_avg) for s in samples]) / len(samples)
+                    z_mad = sum([abs(s[2] - z_avg) for s in samples]) / len(samples)
+                    # print out results
+                    self.gcode.respond_info(f'tool {tool_id}: x={x_avg:.4f}, y={y_avg:.4f}, z={z_avg:.4f} (x_mad={x_mad:.6f}, y_mad={y_mad:.6f}, z_mad={z_mad:.6f})')
 
-                # check if we are within tolerance
-                if x_mad <= tolerance and y_mad <= tolerance and z_mad <= tolerance:
-                    self.gcode.respond_info(f'tool {tool_id}: alignment successful')
-                    self.gcode.run_script_from_command(f'SET_TOOL_OFFSET TOOL={tool_id} X={x_avg:.4f} Y={y_avg:.4f} Z={z_avg:.4f}')
-                    if save_it:
-                        self.gcode.run_script_from_command(f'KTCC_SAVE_TOOL_OFFSET TOOL={tool_id}')
-                    break
+                    # check if we are within tolerance
+                    if x_mad <= tolerance and y_mad <= tolerance and z_mad <= tolerance:
+                        self.gcode.respond_info(f'tool {tool_id}: alignment successful')
+                        self.gcode.run_script_from_command(f'SET_TOOL_OFFSET TOOL={tool_id} X={x_avg:.4f} Y={y_avg:.4f} Z={z_avg:.4f}')
+                        if save_it:
+                            self.gcode.run_script_from_command(f'KTCC_SAVE_TOOL_OFFSET TOOL={tool_id}')
+                        break
+                    else:
+                        self.gcode.respond_info(f'tool {tool_id}: alignment failed, retrying')
                 else:
-                    self.gcode.respond_info(f'tool {tool_id}: alignment failed, retrying')
-            else:
-                self.gcode.error(f'tool {tool_id}: alignment failed')
+                    raise gcmd.error(f'tool {tool_id}: alignment failed')
 
 
 def load_config(config):

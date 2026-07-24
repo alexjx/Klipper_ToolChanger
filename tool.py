@@ -289,6 +289,10 @@ class Tool:
 
     # To avoid recursive remaping.
     def select_tool_actual(self, param = None):
+        with self.toollock.changer_operation("select"):
+            self._select_tool_actual(param)
+
+    def _select_tool_actual(self, param = None):
         current_tool_id = int(self.toollock.get_status()['tool_current']) # int(self.toollock.get_tool_current())
 
         self.log.trace("Current Tool is T" + str(current_tool_id) + ".")
@@ -381,119 +385,124 @@ class Tool:
 
 
     def Pickup(self):
-        self.log.track_mount_start(self.name)                 # Log the time it takes for tool mount.
-
         # Check if homed
         if not self.toollock.PrinterIsHomedForToolchange():
             raise self.printer.command_error("Tool.Pickup: Printer not homed and Lazy homing option for tool %s is: %s" % (str(self.name), str(self.lazy_home_when_parking)))
-            return None
 
-        # If has an extruder then activate that extruder.
-        if self.extruder is not None:
-            self.gcode.run_script_from_command(
-                "ACTIVATE_EXTRUDER extruder=%s" %
-                (self.extruder))
+        with self.toollock.changer_operation("pickup"):
+            self.log.track_mount_start(self.name)                 # Log the time it takes for tool mount.
 
-        # apply new retraction options
-        self.apply_retract_options()
+            # If has an extruder then activate that extruder.
+            if self.extruder is not None:
+                self.gcode.run_script_from_command(
+                    "ACTIVATE_EXTRUDER extruder=%s" %
+                    (self.extruder))
 
-        # Run the gcode for pickup.
-        try:
-            context = self.pickup_gcode_template.create_template_context()
-            context['myself'] = self.get_status()
-            context['toollock'] = self.toollock.get_status()
-            self.pickup_gcode_template.run_gcode_from_command(context)
-        except Exception as e:
-            raise Exception("Pickup gcode: Script running error: %s" % (str(e)))
+            # apply new retraction options
+            self.apply_retract_options()
 
-        # Restore fan if has a fan.
-        if self.fan is not None:
-            self.gcode.run_script_from_command(
-                "SET_FAN_SPEED FAN=" + self.fan + " SPEED=" + str(self.toollock.get_status()['saved_fan_speed']))
+            # Run the gcode for pickup.
+            try:
+                context = self.pickup_gcode_template.create_template_context()
+                context['myself'] = self.get_status()
+                context['toollock'] = self.toollock.get_status()
+                self.toollock.mark_changer_risk()
+                self.pickup_gcode_template.run_gcode_from_command(context)
+            except Exception as e:
+                raise Exception("Pickup gcode: Script running error: %s" % (str(e)))
 
-        # Set Tool specific input shaper. -- Deprecated --
-        if self.shaper_freq_x != 0 or self.shaper_freq_y != 0:
-            # self.log.always("shaper_freq will be deprecated. Use SET_INPUT_SHAPER inside the pickup gcode instead.")
-            cmd = ("SET_INPUT_SHAPER" +
-                " SHAPER_FREQ_X=" + str(self.shaper_freq_x) +
-                " SHAPER_FREQ_Y=" + str(self.shaper_freq_y) +
-                " DAMPING_RATIO_X=" + str(self.shaper_damping_ratio_x) +
-                " DAMPING_RATIO_Y=" + str(self.shaper_damping_ratio_y) +
-                " SHAPER_TYPE_X=" + str(self.shaper_type_x) +
-                " SHAPER_TYPE_Y=" + str(self.shaper_type_y) )
-            self.log.trace("Pickup_inpshaper: " + cmd)
-            self.gcode.run_script_from_command(cmd)
+            # Restore fan if has a fan.
+            if self.fan is not None:
+                self.gcode.run_script_from_command(
+                    "SET_FAN_SPEED FAN=" + self.fan + " SPEED=" + str(self.toollock.get_status()['saved_fan_speed']))
 
-        # Save current picked up tool and print on screen.
-        self.toollock.SaveCurrentTool(self.name)
-        if self.is_virtual:
-            self.log.always("Physical Tool for T%d picked up." % (self.name))
-        else:
-            self.log.always("T%d picked up." % (self.name))
+            # Set Tool specific input shaper. -- Deprecated --
+            if self.shaper_freq_x != 0 or self.shaper_freq_y != 0:
+                # self.log.always("shaper_freq will be deprecated. Use SET_INPUT_SHAPER inside the pickup gcode instead.")
+                cmd = ("SET_INPUT_SHAPER" +
+                    " SHAPER_FREQ_X=" + str(self.shaper_freq_x) +
+                    " SHAPER_FREQ_Y=" + str(self.shaper_freq_y) +
+                    " DAMPING_RATIO_X=" + str(self.shaper_damping_ratio_x) +
+                    " DAMPING_RATIO_Y=" + str(self.shaper_damping_ratio_y) +
+                    " SHAPER_TYPE_X=" + str(self.shaper_type_x) +
+                    " SHAPER_TYPE_Y=" + str(self.shaper_type_y) )
+                self.log.trace("Pickup_inpshaper: " + cmd)
+                self.gcode.run_script_from_command(cmd)
 
-        self.log.track_mount_end(self.name)             # Log number of toolchanges and the time it takes for tool mounting.
+            # Save current picked up tool and print on screen.
+            self.toollock.SaveCurrentTool(self.name)
+            if self.is_virtual:
+                self.log.always("Physical Tool for T%d picked up." % (self.name))
+            else:
+                self.log.always("T%d picked up." % (self.name))
+
+            self.log.track_mount_end(self.name)             # Log number of toolchanges and the time it takes for tool mounting.
 
     def Dropoff(self, force_virtual_unload = False):
-        self.log.always("Dropoff: T%s - Running." % str(self.name))
-
-        self.log.track_selected_tool_end(self.name) # Log that the current tool is to be unmounted.
-
         # Check if homed
         if not self.toollock.PrinterIsHomedForToolchange():
-            self.log.always("Tool.Dropoff: Printer not homed and Lazy homing option is: " + str(self.lazy_home_when_parking))
-            return None
+            raise self.printer.command_error("Tool.Dropoff: Printer not homed and Lazy homing option is: " + str(self.lazy_home_when_parking))
 
-        # Check if this is a virtual tool.
-        self.log.trace("Dropoff: T" + str(self.name) + "- is_virtual: " + str(self.is_virtual))
-        if self.is_virtual:
-            # Only dropoff if it is required.
-            if self.unload_virtual_at_dropoff or force_virtual_unload:
-                self.log.debug("T%s: unload_virtual_at_dropoff: %s, force_virtual_unload: %s" % (str(self.name), str(self.unload_virtual_at_dropoff), str(force_virtual_unload)))
-                self.log.info("Dropoff: T" + str(self.name) + "- Virtual - Running UnloadVirtual")
-                self.UnloadVirtual()
+        with self.toollock.changer_operation("dropoff"):
+            self.log.always("Dropoff: T%s - Running." % str(self.name))
 
-        self.log.track_unmount_start(self.name)                 # Log the time it takes for tool change.
-        # Run the gcode for dropoff.
-        try:
-            context = self.dropoff_gcode_template.create_template_context()
-            context['myself'] = self.get_status()
-            context['toollock'] = self.toollock.get_status()
-            self.dropoff_gcode_template.run_gcode_from_command(context)
-        except Exception as e:
-            raise Exception("Dropoff gcode: Script running error: %s" % (str(e)))
+            self.log.track_selected_tool_end(self.name) # Log that the current tool is to be unmounted.
 
-        # Turn off fan if has a fan.
-        if self.fan is not None:
-            # wait all move finish before change fan
-            toolhead = self.printer.lookup_object('toolhead')
-            toolhead.wait_moves()
-            self.gcode.run_script_from_command(
-                "SET_FAN_SPEED FAN=" + self.fan + " SPEED=0" )
+            # Check if this is a virtual tool.
+            self.log.trace("Dropoff: T" + str(self.name) + "- is_virtual: " + str(self.is_virtual))
+            if self.is_virtual:
+                # Only dropoff if it is required.
+                if self.unload_virtual_at_dropoff or force_virtual_unload:
+                    self.log.debug("T%s: unload_virtual_at_dropoff: %s, force_virtual_unload: %s" % (str(self.name), str(self.unload_virtual_at_dropoff), str(force_virtual_unload)))
+                    self.log.info("Dropoff: T" + str(self.name) + "- Virtual - Running UnloadVirtual")
+                    self.toollock.mark_changer_risk()
+                    self.UnloadVirtual()
 
-        self.toollock.SaveCurrentTool(self.TOOL_UNLOCKED)   # Dropoff successfull
-        self.log.track_unmount_end(self.name)                 # Log the time it takes for tool change.
+            self.log.track_unmount_start(self.name)                 # Log the time it takes for tool change.
+            # Run the gcode for dropoff.
+            try:
+                context = self.dropoff_gcode_template.create_template_context()
+                context['myself'] = self.get_status()
+                context['toollock'] = self.toollock.get_status()
+                self.toollock.mark_changer_risk()
+                self.dropoff_gcode_template.run_gcode_from_command(context)
+            except Exception as e:
+                raise Exception("Dropoff gcode: Script running error: %s" % (str(e)))
+
+            # Turn off fan if has a fan.
+            if self.fan is not None:
+                # wait all move finish before change fan
+                toolhead = self.printer.lookup_object('toolhead')
+                toolhead.wait_moves()
+                self.gcode.run_script_from_command(
+                    "SET_FAN_SPEED FAN=" + self.fan + " SPEED=0" )
+
+            self.toollock.SaveCurrentTool(self.TOOL_UNLOCKED)   # Dropoff successfull
+            self.log.track_unmount_end(self.name)                 # Log the time it takes for tool change.
 
 
     def LoadVirtual(self):
-        self.log.info("Loading virtual tool: T%d." % self.name)
-        self.log.track_mount_start(self.name)                 # Log the time it takes for tool mount.
+        with self.toollock.changer_operation("load_virtual"):
+            self.log.info("Loading virtual tool: T%d." % self.name)
+            self.log.track_mount_start(self.name)                 # Log the time it takes for tool mount.
 
-        # Run the gcode for Virtual Load.
-        try:
-            context = self.virtual_toolload_gcode_template.create_template_context()
-            context['myself'] = self.get_status()
-            context['toollock'] = self.toollock.get_status()
-            self.virtual_toolload_gcode_template.run_gcode_from_command(context)
-        except Exception as e:
-            raise Exception("virtual_toolload_gcode: Script running error: %s" % (str(e)))
+            # Run the gcode for Virtual Load.
+            try:
+                context = self.virtual_toolload_gcode_template.create_template_context()
+                context['myself'] = self.get_status()
+                context['toollock'] = self.toollock.get_status()
+                self.toollock.mark_changer_risk()
+                self.virtual_toolload_gcode_template.run_gcode_from_command(context)
+            except Exception as e:
+                raise Exception("virtual_toolload_gcode: Script running error: %s" % (str(e)))
 
-        pp = self.printer.lookup_object('tool ' + str(self.physical_parent_id))
-        pp.set_virtual_loaded(int(self.name))
+            pp = self.printer.lookup_object('tool ' + str(self.physical_parent_id))
+            pp.set_virtual_loaded(int(self.name))
 
-        # Save current picked up tool and print on screen.
-        self.toollock.SaveCurrentTool(self.name)
-        self.log.trace("Virtual T%d Loaded" % (int(self.name)))
-        self.log.track_mount_end(self.name)             # Log number of toolchanges and the time it takes for tool mounting.
+            # Save current picked up tool and print on screen.
+            self.toollock.SaveCurrentTool(self.name)
+            self.log.trace("Virtual T%d Loaded" % (int(self.name)))
+            self.log.track_mount_end(self.name)             # Log number of toolchanges and the time it takes for tool mounting.
 
     def set_virtual_loaded(self, value = -1):
         self.virtual_loaded = value
@@ -501,26 +510,28 @@ class Tool:
 
 
     def UnloadVirtual(self):
-        self.log.info("Unloading virtual tool: T%d." % self.name)
-        self.log.track_unmount_start(self.name)                 # Log the time it takes for tool unload.
+        with self.toollock.changer_operation("unload_virtual"):
+            self.log.info("Unloading virtual tool: T%d." % self.name)
+            self.log.track_unmount_start(self.name)                 # Log the time it takes for tool unload.
 
-        # Run the gcode for Virtual Unload.
-        try:
-            context = self.virtual_toolunload_gcode_template.create_template_context()
-            context['myself'] = self.get_status()
-            context['toollock'] = self.toollock.get_status()
-            self.virtual_toolunload_gcode_template.run_gcode_from_command(context)
-        except Exception as e:
-            raise Exception("virtual_toolunload_gcode: Script running error:\n%s" % str(e))
+            # Run the gcode for Virtual Unload.
+            try:
+                context = self.virtual_toolunload_gcode_template.create_template_context()
+                context['myself'] = self.get_status()
+                context['toollock'] = self.toollock.get_status()
+                self.toollock.mark_changer_risk()
+                self.virtual_toolunload_gcode_template.run_gcode_from_command(context)
+            except Exception as e:
+                raise Exception("virtual_toolunload_gcode: Script running error:\n%s" % str(e))
 
-        pp = self.printer.lookup_object('tool ' + str(self.physical_parent_id))
-        pp.set_virtual_loaded(-1)
+            pp = self.printer.lookup_object('tool ' + str(self.physical_parent_id))
+            pp.set_virtual_loaded(-1)
 
-        # Save current picked up tool and print on screen.
-        self.toollock.SaveCurrentTool(self.name)
-        self.log.trace("Virtual T%d Unloaded" % (int(self.name)))
+            # Save current picked up tool and print on screen.
+            self.toollock.SaveCurrentTool(self.name)
+            self.log.trace("Virtual T%d Unloaded" % (int(self.name)))
 
-        self.log.track_unmount_end(self.name)                 # Log the time it takes for tool unload.
+            self.log.track_unmount_end(self.name)                 # Log the time it takes for tool unload.
 
     def set_retract(self, retract_length=None, retract_speed=None, unretract_extra_length=None, unretract_speed=None, zhop=None):
         if retract_length is not None:

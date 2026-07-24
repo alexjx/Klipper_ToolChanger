@@ -206,6 +206,22 @@ This command can be used without any additional parameters. Without parameters i
 - **Toollock**
   - `global_offset` - Global offset.
   - `tool_current` - -2: Unknown tool locked, -1: No tool locked, 0: and up are toolnames.
+  - `changer_mode` - Runtime-only ToolChanger operation state. This value is
+    not persisted and is one of:
+    - `SYNCHRONIZING` - Klippy is restoring and reconciling ToolChanger state
+      after process startup.
+    - `IDLE` - ToolChanger state is stable. Routine external mechanical
+      controls require this state.
+    - `CHANGING` - A ToolChanger or alignment transaction that may involve
+      mechanical work is active.
+    - `RECOVERY_REQUIRED` - An operation failed after mechanical risk began,
+      or the physical tool identity is unknown. Recovery actions may be
+      invoked from this state.
+
+    A stable `tool_current` of `-2` always results in
+    `RECOVERY_REQUIRED`, never `IDLE`. This state describes ToolChanger
+    transaction activity and its confidence in the existing tool identity; it
+    does not independently verify physical tool attachment.
   - `saved_fan_speed` - Speed saved at each fanspeedchange to be recovered at Toolchange.
   - `purge_on_toolchange` - For use in macros to enable/disable purge/wipe code globaly.
   - `restore_position_on_toolchange_type` - The type of restore position:
